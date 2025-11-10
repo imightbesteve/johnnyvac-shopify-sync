@@ -3,12 +3,18 @@ import csv
 import requests
 from datetime import datetime
 import json
+import time
 
 # Configuration
 JOHNNYVAC_CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv"
 JOHNNYVAC_IMAGE_BASE = "https://www.johnnyvacstock.com/photos/web/"
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE')  # e.g., 'your-store.myshopify.com'
 SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
+
+# Batch Processing Settings
+BATCH_SIZE = 100  # Process 100 products at a time
+RATE_LIMIT_DELAY = 0.5  # Wait 0.5 seconds between API calls (2 requests/sec)
+BATCH_DELAY = 5  # Wait 5 seconds between batches
 
 # CSV Column Mapping - JohnnyVac CSV Structure
 CSV_COLUMNS = {
@@ -59,22 +65,40 @@ class ShopifySync:
         print(f"Found {len(products)} products in CSV")
         return products
 
-    def get_product_by_sku(self, sku):
-        """Get existing product from Shopify by SKU"""
+    def get_all_shopify_products(self):
+        """Get all existing products from Shopify and build SKU lookup"""
+        print("Fetching existing Shopify products...")
+        sku_lookup = {}
         url = f"{self.base_url}/products.json"
         params = {'fields': 'id,variants', 'limit': 250}
         
-        response = requests.get(url, headers=self.headers, params=params)
-        if response.status_code != 200:
-            return None
+        while url:
+            response = requests.get(url, headers=self.headers, params=params)
+            if response.status_code != 200:
+                print(f"Warning: Could not fetch products: {response.status_code}")
+                break
+                
+            products = response.json().get('products', [])
             
-        products = response.json().get('products', [])
+            for product in products:
+                for variant in product.get('variants', []):
+                    if variant.get('sku'):
+                        sku_lookup[variant['sku']] = (product['id'], variant['id'])
+            
+            # Handle pagination
+            link_header = response.headers.get('Link', '')
+            if 'rel="next"' in link_header:
+                # Extract next URL from Link header
+                next_link = [l for l in link_header.split(',') if 'rel="next"' in l]
+                if next_link:
+                    url = next_link[0].split(';')[0].strip('<> ')
+                else:
+                    url = None
+            else:
+                url = None
         
-        for product in products:
-            for variant in product.get('variants', []):
-                if variant.get('sku') == sku:
-                    return product['id'], variant['id']
-        return None
+        print(f"Found {len(sku_lookup)} existing products in Shopify")
+        return sku_lookup
 
     def create_product(self, csv_row):
         """Create new product in Shopify"""
@@ -183,6 +207,9 @@ class ShopifySync:
         try:
             # Fetch CSV
             csv_products = self.fetch_csv()
+            
+            # Get existing Shopify products (build lookup once)
+            shopify_products = self.get_all_shopify_products()
 
             # Process each product
             for idx, row in enumerate(csv_products, 1):
@@ -194,7 +221,7 @@ class ShopifySync:
                 print(f"\n[{idx}/{len(csv_products)}] Processing SKU: {sku}")
 
                 # Check if product exists
-                existing = self.get_product_by_sku(sku)
+                existing = shopify_products.get(sku)
 
                 if existing:
                     product_id, variant_id = existing
@@ -215,6 +242,8 @@ class ShopifySync:
 
         except Exception as e:
             print(f"ERROR: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
 
 if __name__ == "__main__":
