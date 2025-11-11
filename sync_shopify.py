@@ -62,6 +62,14 @@ class ShopifySync:
         lines = response.text.splitlines()
         reader = csv.DictReader(lines)
         products = list(reader)
+        
+        # DEBUG: Show CSV structure
+        if products:
+            print(f"\nDEBUG - CSV Headers: {list(products[0].keys())}")
+            print(f"DEBUG - First 3 rows:")
+            for i, row in enumerate(products[:3]):
+                print(f"  Row {i+1}: SKU='{row.get('SKU', 'MISSING')}', Title='{row.get('ProductTitleFR', 'MISSING')[:50]}'")
+        
         print(f"Found {len(products)} products in CSV")
         return products
 
@@ -288,7 +296,14 @@ class ShopifySync:
                 for idx, row in enumerate(batch, start_idx + 1):
                     sku = row.get(CSV_COLUMNS['sku'], '').strip()
                     
+                    # DEBUG: Print first few rows to see what's happening
+                    if idx <= 5:
+                        print(f"DEBUG Row {idx}: SKU field = '{CSV_COLUMNS['sku']}', Value = '{row.get(CSV_COLUMNS['sku'], 'MISSING')}'")
+                        print(f"DEBUG Available columns: {list(row.keys())[:10]}")
+                    
                     if not sku:
+                        if idx <= 5:
+                            print(f"DEBUG: Skipping row {idx} - no SKU found")
                         continue
 
                     print(f"[{idx}/{total_products}] {sku}...", end=" ")
