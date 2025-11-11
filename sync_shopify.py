@@ -58,9 +58,9 @@ class ShopifySync:
         response = requests.get(JOHNNYVAC_CSV_URL)
         response.raise_for_status()
         
-        # Parse CSV
+        # Parse CSV - NOTE: This CSV uses semicolons (;) as delimiters, not commas!
         lines = response.text.splitlines()
-        reader = csv.DictReader(lines)
+        reader = csv.DictReader(lines, delimiter=';')
         products = list(reader)
         
         # DEBUG: Show CSV structure
@@ -68,7 +68,11 @@ class ShopifySync:
             print(f"\nDEBUG - CSV Headers: {list(products[0].keys())}")
             print(f"DEBUG - First 3 rows:")
             for i, row in enumerate(products[:3]):
-                print(f"  Row {i+1}: SKU='{row.get('SKU', 'MISSING')}', Title='{row.get('ProductTitleFR', 'MISSING')[:50]}'")
+                sku = row.get('SKU', 'MISSING')
+                title = row.get('ProductTitleFR', 'MISSING')
+                if len(title) > 50:
+                    title = title[:50]
+                print(f"  Row {i+1}: SKU='{sku}', Title='{title}'")
         
         print(f"Found {len(products)} products in CSV")
         return products
