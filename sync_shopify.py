@@ -12,9 +12,9 @@ SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE')  # e.g., 'your-store.myshopify.c
 SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
 
 # Batch Processing Settings
-BATCH_SIZE = 100  # Process 100 products at a time
-RATE_LIMIT_DELAY = 0.5  # Wait 0.5 seconds between API calls (2 requests/sec)
-BATCH_DELAY = 5  # Wait 5 seconds between batches
+BATCH_SIZE = 50  # Reduced from 100 to 50 for better stability
+RATE_LIMIT_DELAY = 1.0  # Increased from 0.5 to 1.0 second between API calls
+BATCH_DELAY = 10  # Increased from 5 to 10 seconds between batches
 
 # CSV Column Mapping - JohnnyVac CSV Structure
 CSV_COLUMNS = {
@@ -193,25 +193,40 @@ class ShopifySync:
         # Rate limiting
         time.sleep(RATE_LIMIT_DELAY)
         
-        response = requests.post(url, headers=self.headers, json=product_data)
+        try:
+            response = requests.post(url, headers=self.headers, json=product_data, timeout=30)
 
-        if response.status_code == 201:
-            print(f"✓ Created: {sku} - {title[:50]}")
-            self.stats['created'] += 1
-            return True
-        elif response.status_code == 429:
-            # Rate limited - wait and retry once
-            print(f"⚠ Rate limited, waiting 2 seconds...")
-            time.sleep(2)
-            response = requests.post(url, headers=self.headers, json=product_data)
             if response.status_code == 201:
                 print(f"✓ Created: {sku} - {title[:50]}")
                 self.stats['created'] += 1
                 return True
-        
-        print(f"✗ Failed to create {sku}: {response.status_code} - {response.text[:100]}")
-        self.stats['errors'] += 1
-        return False
+            elif response.status_code == 429:
+                # Rate limited - wait and retry once
+                print(f"⚠ Rate limited, waiting 5 seconds...")
+                time.sleep(5)
+                response = requests.post(url, headers=self.headers, json=product_data, timeout=30)
+                if response.status_code == 201:
+                    print(f"✓ Created: {sku} - {title[:50]}")
+                    self.stats['created'] += 1
+                    return True
+            
+            print(f"✗ Failed to create {sku}: {response.status_code} - {response.text[:100]}")
+            self.stats['errors'] += 1
+            return False
+            
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            print(f"⚠ Connection error for {sku}, retrying in 10 seconds...")
+            time.sleep(10)
+            try:
+                response = requests.post(url, headers=self.headers, json=product_data, timeout=30)
+                if response.status_code == 201:
+                    print(f"✓ Created: {sku} - {title[:50]}")
+                    self.stats['created'] += 1
+                    return True
+            except Exception as retry_error:
+                print(f"✗ Failed to create {sku} after retry: {str(retry_error)[:100]}")
+                self.stats['errors'] += 1
+                return False
 
     def update_product(self, product_id, variant_id, csv_row):
         """Update existing product in Shopify"""
@@ -238,25 +253,40 @@ class ShopifySync:
         # Rate limiting
         time.sleep(RATE_LIMIT_DELAY)
         
-        response = requests.put(url, headers=self.headers, json=variant_data)
+        try:
+            response = requests.put(url, headers=self.headers, json=variant_data, timeout=30)
 
-        if response.status_code == 200:
-            print(f"✓ Updated: {sku} (${price}, Qty: {quantity})")
-            self.stats['updated'] += 1
-            return True
-        elif response.status_code == 429:
-            # Rate limited - wait and retry once
-            print(f"⚠ Rate limited, waiting 2 seconds...")
-            time.sleep(2)
-            response = requests.put(url, headers=self.headers, json=variant_data)
             if response.status_code == 200:
                 print(f"✓ Updated: {sku} (${price}, Qty: {quantity})")
                 self.stats['updated'] += 1
                 return True
-        
-        print(f"✗ Failed to update {sku}: {response.status_code}")
-        self.stats['errors'] += 1
-        return False
+            elif response.status_code == 429:
+                # Rate limited - wait and retry once
+                print(f"⚠ Rate limited, waiting 5 seconds...")
+                time.sleep(5)
+                response = requests.put(url, headers=self.headers, json=variant_data, timeout=30)
+                if response.status_code == 200:
+                    print(f"✓ Updated: {sku} (${price}, Qty: {quantity})")
+                    self.stats['updated'] += 1
+                    return True
+            
+            print(f"✗ Failed to update {sku}: {response.status_code}")
+            self.stats['errors'] += 1
+            return False
+            
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            print(f"⚠ Connection error for {sku}, retrying in 10 seconds...")
+            time.sleep(10)
+            try:
+                response = requests.put(url, headers=self.headers, json=variant_data, timeout=30)
+                if response.status_code == 200:
+                    print(f"✓ Updated: {sku} (${price}, Qty: {quantity})")
+                    self.stats['updated'] += 1
+                    return True
+            except Exception as retry_error:
+                print(f"✗ Failed to update {sku} after retry: {str(retry_error)[:100]}")
+                self.stats['errors'] += 1
+                return False
 
     def sync(self):
         """Main sync function with batch processing"""
