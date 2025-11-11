@@ -121,39 +121,6 @@ class ShopifySync:
         
         print(f"Found {len(sku_lookup)} existing products in Shopify")
         return sku_lookup
-        """Get all existing products from Shopify and build SKU lookup"""
-        print("Fetching existing Shopify products...")
-        sku_lookup = {}
-        url = f"{self.base_url}/products.json"
-        params = {'fields': 'id,variants', 'limit': 250}
-        
-        while url:
-            response = requests.get(url, headers=self.headers, params=params)
-            if response.status_code != 200:
-                print(f"Warning: Could not fetch products: {response.status_code}")
-                break
-                
-            products = response.json().get('products', [])
-            
-            for product in products:
-                for variant in product.get('variants', []):
-                    if variant.get('sku'):
-                        sku_lookup[variant['sku']] = (product['id'], variant['id'])
-            
-            # Handle pagination
-            link_header = response.headers.get('Link', '')
-            if 'rel="next"' in link_header:
-                # Extract next URL from Link header
-                next_link = [l for l in link_header.split(',') if 'rel="next"' in l]
-                if next_link:
-                    url = next_link[0].split(';')[0].strip('<> ')
-                else:
-                    url = None
-            else:
-                url = None
-        
-        print(f"Found {len(sku_lookup)} existing products in Shopify")
-        return sku_lookup
 
     def create_product(self, csv_row):
         """Create new product in Shopify"""
