@@ -155,23 +155,17 @@ def get_all_product_images(sku):
     
     return images
 
-def update_inventory(inventory_item_id, quantity):
+def update_inventory(variant_id, quantity):
+    """Update inventory by setting it directly on the variant"""
     try:
-        # First get available locations
-        locations = shopify_request('GET', 'locations.json')
-        if not locations or not locations.get('locations'):
-            print("No locations found")
-            return
-        
-        location_id = locations['locations'][0]['id']
-        
-        # Update inventory level
         data = {
-            'location_id': location_id,
-            'inventory_item_id': inventory_item_id,
-            'available': quantity
+            'variant': {
+                'id': variant_id,
+                'inventory_quantity': quantity,
+                'inventory_management': 'shopify'
+            }
         }
-        shopify_request('POST', 'inventory_levels/set.json', data)
+        shopify_request('PUT', f'variants/{variant_id}.json', data)
         
     except Exception as e:
         print(f"Error updating inventory: {e}")
@@ -206,12 +200,12 @@ def create_product(row, images):
         if response and 'product' in response:
             product = response['product']
             product_id = product['id']
-            inventory_item_id = product['variants'][0].get('inventory_item_id')
+            variant_id = product['variants'][0]['id']
             
-            # Set initial inventory
+            # Set initial inventory using variant update
             quantity = int(row.get('Inventory', 0))
-            if inventory_item_id:
-                update_inventory(inventory_item_id, quantity)
+            if variant_id:
+                update_inventory(variant_id, quantity)
             
             # Set out_of_stock_since metafield if quantity is 0
             if quantity == 0:
@@ -229,7 +223,6 @@ def create_product(row, images):
 def update_product(product_info, row, images):
     product_id = product_info['id']
     variant_id = product_info['variant_id']
-    inventory_item_id = product_info['inventory_item_id']
     
     title = row.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
     description = row.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', '')
@@ -248,21 +241,19 @@ def update_product(product_info, row, images):
         }
         shopify_request('PUT', f'products/{product_id}.json', product_data)
         
-        # Update variant
+        # Update variant with price, weight, barcode AND inventory
         if variant_id:
             variant_data = {
                 'variant': {
                     'id': variant_id,
                     'price': row.get('RegularPrice', '0'),
                     'weight': float(row.get('weight', 0)),
-                    'barcode': row.get('upc', '')
+                    'barcode': row.get('upc', ''),
+                    'inventory_quantity': quantity,
+                    'inventory_management': 'shopify'
                 }
             }
             shopify_request('PUT', f'variants/{variant_id}.json', variant_data)
-        
-        # Update inventory
-        if inventory_item_id:
-            update_inventory(inventory_item_id, quantity)
         
         # Get existing metafields
         metafields = get_product_metafields(product_id)
