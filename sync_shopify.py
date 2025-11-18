@@ -1,394 +1,406 @@
 import os
 import csv
 import requests
-from datetime import datetime
-import json
 import time
+from datetime import datetime, timedelta
+from io import StringIO
 
 # Configuration
-JOHNNYVAC_CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv"
-JOHNNYVAC_IMAGE_BASE = "https://www.johnnyvacstock.com/photos/web/"
-SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE')  # e.g., 'your-store.myshopify.com'
+SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE')
 SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
+CSV_URL = 'https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv'
+IMAGE_BASE_URL = 'https://www.johnnyvacstock.com/photos/web/'
 
-# Batch Processing Settings
-BATCH_SIZE = 50  # Reduced from 100 to 50 for better stability
-RATE_LIMIT_DELAY = 1.0  # Increased from 0.5 to 1.0 second between API calls
-BATCH_DELAY = 10  # Increased from 5 to 10 seconds between batches
+BATCH_SIZE = 50
+RATE_LIMIT_DELAY = 1.0
+BATCH_DELAY = 10
+LANGUAGE = 'en'
+OUT_OF_STOCK_DAYS_THRESHOLD = 30
+REQUEST_TIMEOUT = 30
 
-# CSV Column Mapping - JohnnyVac CSV Structure
-CSV_COLUMNS = {
-    'sku': 'SKU',
-    'title_en': 'ProductTitleEN',
-    'title_fr': 'ProductTitleFR',
-    'description_en': 'ProductDescriptionEN',
-    'description_fr': 'ProductDescriptionFR',
-    'price': 'RegularPrice',
-    'quantity': 'Inventory',
-    'barcode': 'upc',
-    'weight': 'weight',
-    'image_url': 'ImageUrl',
-    'product_type': 'ProductCategory',
-    'associated_skus': 'AssociatedSkus'
-}
-
-# Language setting - change to 'fr' for French
-LANGUAGE = 'en'  # Options: 'en' or 'fr'
-
-class ShopifySync:
-    def __init__(self):
-        self.store = SHOPIFY_STORE
-        self.token = SHOPIFY_ACCESS_TOKEN
-        self.api_version = '2024-10'
-        self.base_url = f"https://{self.store}/admin/api/{self.api_version}"
-        self.headers = {
-            'X-Shopify-Access-Token': self.token,
-            'Content-Type': 'application/json'
-        }
-        self.stats = {
-            'created': 0,
-            'updated': 0,
-            'errors': 0,
-            'skipped': 0
-        }
-
-    def fetch_csv(self):
-        """Fetch CSV from JohnnyVac"""
-        print(f"Fetching CSV from {JOHNNYVAC_CSV_URL}...")
-        response = requests.get(JOHNNYVAC_CSV_URL)
-        response.raise_for_status()
-        
-        # Parse CSV - NOTE: This CSV uses semicolons (;) as delimiters, not commas!
-        lines = response.text.splitlines()
-        reader = csv.DictReader(lines, delimiter=';')
-        products = list(reader)
-        
-        # DEBUG: Show CSV structure
-        if products:
-            print(f"\nDEBUG - CSV Headers: {list(products[0].keys())}")
-            print(f"DEBUG - First 3 rows:")
-            for i, row in enumerate(products[:3]):
-                sku = row.get('SKU', 'MISSING')
-                title = row.get('ProductTitleFR', 'MISSING')
-                if len(title) > 50:
-                    title = title[:50]
-                print(f"  Row {i+1}: SKU='{sku}', Title='{title}'")
-        
-        print(f"Found {len(products)} products in CSV")
-        return products
-
-    def test_connection(self):
-        """Test Shopify API connection"""
-        print("Testing Shopify API connection...")
-        url = f"{self.base_url}/shop.json"
-        response = requests.get(url, headers=self.headers)
-        
-        if response.status_code == 200:
-            shop_data = response.json().get('shop', {})
-            print(f"✓ Connected to: {shop_data.get('name', 'Unknown')}")
-            print(f"  Store: {shop_data.get('domain', 'Unknown')}")
-            return True
-        else:
-            print(f"✗ Connection failed: {response.status_code}")
-            print(f"  Error: {response.text}")
-            if response.status_code == 401:
-                print("\n⚠️  Authentication Error!")
-                print("  Check that:")
-                print("  1. SHOPIFY_STORE is correct (e.g., 'your-store.myshopify.com')")
-                print("  2. SHOPIFY_ACCESS_TOKEN is valid and not expired")
-                print("  3. The app has proper API permissions")
-            return False
-
-    def get_all_shopify_products(self):
-        """Get all existing products from Shopify and build SKU lookup"""
-        print("Fetching existing Shopify products...")
-        sku_lookup = {}
-        url = f"{self.base_url}/products.json"
-        params = {'fields': 'id,variants', 'limit': 250}
-        
-        while url:
-            response = requests.get(url, headers=self.headers, params=params)
-            if response.status_code != 200:
-                print(f"Warning: Could not fetch products: {response.status_code}")
-                break
+# Shopify API helpers
+def shopify_request(method, endpoint, data=None, retries=3):
+    url = f'https://{SHOPIFY_STORE}/admin/api/2024-01/{endpoint}'
+    headers = {
+        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+        'Content-Type': 'application/json'
+    }
+    
+    for attempt in range(retries):
+        try:
+            if method == 'GET':
+                response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            elif method == 'POST':
+                response = requests.post(url, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
+            elif method == 'PUT':
+                response = requests.put(url, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
+            elif method == 'DELETE':
+                response = requests.delete(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 5))
+                print(f"Rate limited. Waiting {retry_after} seconds...")
+                time.sleep(retry_after)
+                continue
                 
-            products = response.json().get('products', [])
+            response.raise_for_status()
+            return response.json() if response.content else {}
             
-            for product in products:
-                for variant in product.get('variants', []):
-                    if variant.get('sku'):
-                        sku_lookup[variant['sku']] = (product['id'], variant['id'])
-            
-            # Handle pagination
-            link_header = response.headers.get('Link', '')
-            if 'rel="next"' in link_header:
-                # Extract next URL from Link header
-                next_link = [l for l in link_header.split(',') if 'rel="next"' in l]
-                if next_link:
-                    url = next_link[0].split(';')[0].strip('<> ')
-                else:
-                    url = None
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < retries - 1:
+                wait_time = (attempt + 1) * 5
+                print(f"Connection error (attempt {attempt + 1}/{retries}): {e}")
+                print(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
             else:
-                url = None
-        
-        print(f"Found {len(sku_lookup)} existing products in Shopify")
-        return sku_lookup
+                raise
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 429 and attempt < retries - 1:
+                continue
+            raise
+    
+    return None
 
-    def create_product(self, csv_row):
-        """Create new product in Shopify"""
-        sku = csv_row.get(CSV_COLUMNS['sku'], '').strip()
+def get_all_shopify_products():
+    products = {}
+    endpoint = 'products.json?limit=250'
+    
+    while endpoint:
+        print(f"Fetching products...")
+        response = shopify_request('GET', endpoint)
         
-        if not sku:
-            print("Skipping product with no SKU")
-            self.stats['skipped'] += 1
-            return False
-
-        # Use language setting for title/description
-        title_key = 'title_en' if LANGUAGE == 'en' else 'title_fr'
-        desc_key = 'description_en' if LANGUAGE == 'en' else 'description_fr'
-        
-        title = csv_row.get(CSV_COLUMNS[title_key], sku)
-        description = csv_row.get(CSV_COLUMNS[desc_key], '')
-        price = csv_row.get(CSV_COLUMNS['price'], '0.00')
-        
-        # Handle quantity - convert to int, default to 0
-        try:
-            quantity = int(float(csv_row.get(CSV_COLUMNS['quantity'], 0)))
-        except (ValueError, TypeError):
-            quantity = 0
+        if not response:
+            break
             
-        vendor = 'JohnnyVac'
-        product_type = csv_row.get(CSV_COLUMNS.get('product_type', ''), '')
-        barcode = csv_row.get(CSV_COLUMNS.get('barcode', ''), '')
-        weight = csv_row.get(CSV_COLUMNS.get('weight', ''), '')
+        for product in response.get('products', []):
+            sku = None
+            for variant in product.get('variants', []):
+                if variant.get('sku'):
+                    sku = variant['sku']
+                    break
+            
+            if sku:
+                products[sku] = {
+                    'id': product['id'],
+                    'variant_id': product['variants'][0]['id'] if product.get('variants') else None,
+                    'inventory_item_id': product['variants'][0].get('inventory_item_id') if product.get('variants') else None,
+                    'metafields': {}
+                }
+        
+        link_header = response.get('link')
+        endpoint = None
+        if link_header:
+            links = link_header.split(',')
+            for link in links:
+                if 'rel="next"' in link:
+                    endpoint = link[link.find('<')+1:link.find('>')].split('/admin/api/2024-01/')[1]
+                    break
+        
+        time.sleep(RATE_LIMIT_DELAY)
+    
+    print(f"Found {len(products)} existing products in Shopify")
+    return products
 
-        # Use ImageUrl from CSV, or build from SKU
-        image_url = csv_row.get(CSV_COLUMNS.get('image_url', ''), '').strip()
-        if not image_url:
-            image_url = f"{JOHNNYVAC_IMAGE_BASE}{sku}.jpg"
+def get_product_metafields(product_id):
+    metafields = {}
+    try:
+        response = shopify_request('GET', f'products/{product_id}/metafields.json')
+        for mf in response.get('metafields', []):
+            if mf['namespace'] == 'custom':
+                metafields[mf['key']] = mf['value']
+    except Exception as e:
+        print(f"Error fetching metafields for product {product_id}: {e}")
+    
+    time.sleep(RATE_LIMIT_DELAY)
+    return metafields
 
+def set_product_metafield(product_id, key, value):
+    try:
+        data = {
+            'metafield': {
+                'namespace': 'custom',
+                'key': key,
+                'value': value,
+                'type': 'single_line_text_field'
+            }
+        }
+        shopify_request('POST', f'products/{product_id}/metafields.json', data)
+    except Exception as e:
+        print(f"Error setting metafield {key} for product {product_id}: {e}")
+    
+    time.sleep(RATE_LIMIT_DELAY)
+
+def check_image_exists(url):
+    try:
+        response = requests.head(url, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_all_product_images(sku):
+    images = []
+    
+    # Try main image first
+    main_url = f"{IMAGE_BASE_URL}{sku}.jpg"
+    if check_image_exists(main_url):
+        images.append({'src': main_url})
+    
+    # Try numbered images (-1, -2, -3, etc.)
+    for i in range(1, 6):  # Check up to 5 additional images
+        image_url = f"{IMAGE_BASE_URL}{sku}-{i}.jpg"
+        if check_image_exists(image_url):
+            images.append({'src': image_url})
+        else:
+            break  # Stop at first missing image
+    
+    return images
+
+def update_inventory(inventory_item_id, quantity):
+    try:
+        # First get available locations
+        locations = shopify_request('GET', 'locations.json')
+        if not locations or not locations.get('locations'):
+            print("No locations found")
+            return
+        
+        location_id = locations['locations'][0]['id']
+        
+        # Update inventory level
+        data = {
+            'location_id': location_id,
+            'inventory_item_id': inventory_item_id,
+            'available': quantity
+        }
+        shopify_request('POST', 'inventory_levels/set.json', data)
+        
+    except Exception as e:
+        print(f"Error updating inventory: {e}")
+    
+    time.sleep(RATE_LIMIT_DELAY)
+
+def create_product(row, images):
+    title = row.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
+    description = row.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', '')
+    
+    product_data = {
+        'product': {
+            'title': title,
+            'body_html': description,
+            'vendor': 'JohnnyVac',
+            'product_type': row.get('ProductCategory', ''),
+            'variants': [{
+                'sku': row['SKU'],
+                'price': row.get('RegularPrice', '0'),
+                'inventory_management': 'shopify',
+                'inventory_policy': 'deny',
+                'weight': float(row.get('weight', 0)),
+                'weight_unit': 'kg',
+                'barcode': row.get('upc', '')
+            }],
+            'images': images
+        }
+    }
+    
+    try:
+        response = shopify_request('POST', 'products.json', product_data)
+        if response and 'product' in response:
+            product = response['product']
+            product_id = product['id']
+            inventory_item_id = product['variants'][0].get('inventory_item_id')
+            
+            # Set initial inventory
+            quantity = int(row.get('Inventory', 0))
+            if inventory_item_id:
+                update_inventory(inventory_item_id, quantity)
+            
+            # Set out_of_stock_since metafield if quantity is 0
+            if quantity == 0:
+                today = datetime.now().strftime('%Y-%m-%d')
+                set_product_metafield(product_id, 'out_of_stock_since', today)
+            
+            return True
+    except Exception as e:
+        print(f"Error creating product {row['SKU']}: {e}")
+        return False
+    
+    time.sleep(RATE_LIMIT_DELAY)
+    return False
+
+def update_product(product_info, row, images):
+    product_id = product_info['id']
+    variant_id = product_info['variant_id']
+    inventory_item_id = product_info['inventory_item_id']
+    
+    title = row.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
+    description = row.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', '')
+    quantity = int(row.get('Inventory', 0))
+    
+    try:
+        # Update product details
         product_data = {
-            "product": {
-                "title": title,
-                "body_html": description,
-                "vendor": vendor,
-                "product_type": product_type,
-                "variants": [{
-                    "sku": sku,
-                    "price": price,
-                    "inventory_quantity": quantity,
-                    "inventory_management": "shopify",
-                    "barcode": barcode,
-                    "weight": float(weight) if weight else None,
-                    "weight_unit": "kg"
-                }],
-                "images": [{
-                    "src": image_url
-                }] if image_url else []
+            'product': {
+                'id': product_id,
+                'title': title,
+                'body_html': description,
+                'product_type': row.get('ProductCategory', ''),
+                'images': images
             }
         }
-
-        url = f"{self.base_url}/products.json"
+        shopify_request('PUT', f'products/{product_id}.json', product_data)
         
-        # Rate limiting
-        time.sleep(RATE_LIMIT_DELAY)
-        
-        try:
-            response = requests.post(url, headers=self.headers, json=product_data, timeout=30)
-
-            if response.status_code == 201:
-                print(f"✓ Created: {sku} - {title[:50]}")
-                self.stats['created'] += 1
-                return True
-            elif response.status_code == 429:
-                # Rate limited - wait and retry once
-                print(f"⚠ Rate limited, waiting 5 seconds...")
-                time.sleep(5)
-                response = requests.post(url, headers=self.headers, json=product_data, timeout=30)
-                if response.status_code == 201:
-                    print(f"✓ Created: {sku} - {title[:50]}")
-                    self.stats['created'] += 1
-                    return True
-            
-            print(f"✗ Failed to create {sku}: {response.status_code} - {response.text[:100]}")
-            self.stats['errors'] += 1
-            return False
-            
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            print(f"⚠ Connection error for {sku}, retrying in 10 seconds...")
-            time.sleep(10)
-            try:
-                response = requests.post(url, headers=self.headers, json=product_data, timeout=30)
-                if response.status_code == 201:
-                    print(f"✓ Created: {sku} - {title[:50]}")
-                    self.stats['created'] += 1
-                    return True
-            except Exception as retry_error:
-                print(f"✗ Failed to create {sku} after retry: {str(retry_error)[:100]}")
-                self.stats['errors'] += 1
-                return False
-
-    def update_product(self, product_id, variant_id, csv_row):
-        """Update existing product in Shopify"""
-        sku = csv_row.get(CSV_COLUMNS['sku'], '').strip()
-        price = csv_row.get(CSV_COLUMNS['price'], '0.00')
-        
-        # Handle quantity - convert to int, default to 0
-        try:
-            quantity = int(float(csv_row.get(CSV_COLUMNS['quantity'], 0)))
-        except (ValueError, TypeError):
-            quantity = 0
-
-        # Update variant (price, quantity)
-        variant_data = {
-            "variant": {
-                "id": variant_id,
-                "price": price,
-                "inventory_quantity": quantity
+        # Update variant
+        if variant_id:
+            variant_data = {
+                'variant': {
+                    'id': variant_id,
+                    'price': row.get('RegularPrice', '0'),
+                    'weight': float(row.get('weight', 0)),
+                    'barcode': row.get('upc', '')
+                }
             }
-        }
-
-        url = f"{self.base_url}/variants/{variant_id}.json"
+            shopify_request('PUT', f'variants/{variant_id}.json', variant_data)
         
-        # Rate limiting
-        time.sleep(RATE_LIMIT_DELAY)
+        # Update inventory
+        if inventory_item_id:
+            update_inventory(inventory_item_id, quantity)
         
-        try:
-            response = requests.put(url, headers=self.headers, json=variant_data, timeout=30)
+        # Get existing metafields
+        metafields = get_product_metafields(product_id)
+        out_of_stock_since = metafields.get('out_of_stock_since')
+        
+        # Handle out_of_stock_since metafield
+        if quantity == 0:
+            if not out_of_stock_since:
+                # Product just went out of stock
+                today = datetime.now().strftime('%Y-%m-%d')
+                set_product_metafield(product_id, 'out_of_stock_since', today)
+        else:
+            if out_of_stock_since:
+                # Product back in stock - clear the date
+                set_product_metafield(product_id, 'out_of_stock_since', '')
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error updating product {row['SKU']}: {e}")
+        return False
+    
+    time.sleep(RATE_LIMIT_DELAY)
+    return False
 
-            if response.status_code == 200:
-                print(f"✓ Updated: {sku} (${price}, Qty: {quantity})")
-                self.stats['updated'] += 1
-                return True
-            elif response.status_code == 429:
-                # Rate limited - wait and retry once
-                print(f"⚠ Rate limited, waiting 5 seconds...")
-                time.sleep(5)
-                response = requests.put(url, headers=self.headers, json=variant_data, timeout=30)
-                if response.status_code == 200:
-                    print(f"✓ Updated: {sku} (${price}, Qty: {quantity})")
-                    self.stats['updated'] += 1
-                    return True
-            
-            print(f"✗ Failed to update {sku}: {response.status_code}")
-            self.stats['errors'] += 1
-            return False
-            
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            print(f"⚠ Connection error for {sku}, retrying in 10 seconds...")
-            time.sleep(10)
+def delete_product(product_id, sku):
+    try:
+        shopify_request('DELETE', f'products/{product_id}.json')
+        print(f"Deleted product {sku} (out of stock for 30+ days)")
+        return True
+    except Exception as e:
+        print(f"Error deleting product {sku}: {e}")
+        return False
+    
+    time.sleep(RATE_LIMIT_DELAY)
+    return False
+
+def cleanup_old_out_of_stock(existing_products):
+    print("\nChecking for products to remove (out of stock 30+ days)...")
+    threshold_date = datetime.now() - timedelta(days=OUT_OF_STOCK_DAYS_THRESHOLD)
+    deleted_count = 0
+    
+    for sku, product_info in list(existing_products.items()):
+        product_id = product_info['id']
+        
+        # Get metafields
+        metafields = get_product_metafields(product_id)
+        out_of_stock_since = metafields.get('out_of_stock_since')
+        
+        if out_of_stock_since:
             try:
-                response = requests.put(url, headers=self.headers, json=variant_data, timeout=30)
-                if response.status_code == 200:
-                    print(f"✓ Updated: {sku} (${price}, Qty: {quantity})")
-                    self.stats['updated'] += 1
-                    return True
-            except Exception as retry_error:
-                print(f"✗ Failed to update {sku} after retry: {str(retry_error)[:100]}")
-                self.stats['errors'] += 1
-                return False
+                out_date = datetime.strptime(out_of_stock_since, '%Y-%m-%d')
+                if out_date < threshold_date:
+                    if delete_product(product_id, sku):
+                        deleted_count += 1
+                        del existing_products[sku]
+            except ValueError:
+                print(f"Invalid date format for product {sku}: {out_of_stock_since}")
+    
+    print(f"Removed {deleted_count} products that were out of stock for 30+ days")
 
-    def sync(self):
-        """Main sync function with batch processing"""
-        print("=" * 60)
-        print(f"JohnnyVac → Shopify Sync Started: {datetime.now()}")
-        print("=" * 60)
-
-        try:
-            # Test connection first
-            if not self.test_connection():
-                print("\n❌ Cannot proceed without valid Shopify connection")
-                return False
+def main():
+    print(f"Starting JohnnyVac to Shopify sync at {datetime.now()}")
+    print(f"CSV URL: {CSV_URL}")
+    
+    # Fetch CSV
+    print("\nFetching CSV...")
+    response = requests.get(CSV_URL, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    
+    # Parse CSV with semicolon delimiter
+    csv_text = response.content.decode('utf-8')
+    lines = StringIO(csv_text)
+    reader = csv.DictReader(lines, delimiter=';')
+    products = list(reader)
+    
+    print(f"Found {len(products)} products in CSV")
+    
+    # Get existing Shopify products
+    print("\nFetching existing Shopify products...")
+    existing_products = get_all_shopify_products()
+    
+    # Cleanup old out-of-stock products first
+    cleanup_old_out_of_stock(existing_products)
+    
+    # Process products in batches
+    print(f"\nProcessing products in batches of {BATCH_SIZE}...")
+    created = 0
+    updated = 0
+    skipped = 0
+    
+    for i in range(0, len(products), BATCH_SIZE):
+        batch = products[i:i + BATCH_SIZE]
+        batch_num = i // BATCH_SIZE + 1
+        total_batches = (len(products) + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        print(f"\nProcessing batch {batch_num}/{total_batches}")
+        batch_start = time.time()
+        
+        for row in batch:
+            sku = row.get('SKU', '').strip()
+            if not sku:
+                continue
             
-            print()
+            # Get all available images for this product
+            images = get_all_product_images(sku)
+            if not images:
+                print(f"No images found for {sku}, skipping...")
+                skipped += 1
+                continue
             
-            # Fetch CSV
-            csv_products = self.fetch_csv()
-            total_products = len(csv_products)
+            if sku in existing_products:
+                if update_product(existing_products[sku], row, images):
+                    updated += 1
+                else:
+                    skipped += 1
+            else:
+                if create_product(row, images):
+                    created += 1
+                else:
+                    skipped += 1
             
-            # Get existing Shopify products (build lookup once)
-            shopify_products = self.get_all_shopify_products()
+            time.sleep(RATE_LIMIT_DELAY)
+        
+        batch_time = time.time() - batch_start
+        print(f"Batch {batch_num} completed in {batch_time:.1f}s")
+        print(f"Progress: {created} created, {updated} updated, {skipped} skipped")
+        
+        if i + BATCH_SIZE < len(products):
+            print(f"Waiting {BATCH_DELAY}s before next batch...")
+            time.sleep(BATCH_DELAY)
+    
+    print(f"\n=== Sync Complete ===")
+    print(f"Created: {created}")
+    print(f"Updated: {updated}")
+    print(f"Skipped: {skipped}")
+    print(f"Total processed: {created + updated + skipped}")
+    print(f"Finished at {datetime.now()}")
 
-            # Calculate batches
-            num_batches = (total_products + BATCH_SIZE - 1) // BATCH_SIZE
-            print(f"\nProcessing {total_products} products in {num_batches} batches of {BATCH_SIZE}")
-            print("=" * 60)
-
-            # Process in batches
-            for batch_num in range(num_batches):
-                start_idx = batch_num * BATCH_SIZE
-                end_idx = min(start_idx + BATCH_SIZE, total_products)
-                batch = csv_products[start_idx:end_idx]
-                
-                print(f"\n{'='*60}")
-                print(f"BATCH {batch_num + 1}/{num_batches} - Products {start_idx + 1} to {end_idx}")
-                print(f"{'='*60}")
-                
-                batch_start_time = time.time()
-                
-                # Process each product in batch
-                for idx, row in enumerate(batch, start_idx + 1):
-                    sku = row.get(CSV_COLUMNS['sku'], '').strip()
-                    
-                    # DEBUG: Print first few rows to see what's happening
-                    if idx <= 5:
-                        print(f"DEBUG Row {idx}: SKU field = '{CSV_COLUMNS['sku']}', Value = '{row.get(CSV_COLUMNS['sku'], 'MISSING')}'")
-                        print(f"DEBUG Available columns: {list(row.keys())[:10]}")
-                    
-                    if not sku:
-                        if idx <= 5:
-                            print(f"DEBUG: Skipping row {idx} - no SKU found")
-                        continue
-
-                    print(f"[{idx}/{total_products}] {sku}...", end=" ")
-
-                    # Check if product exists
-                    existing = shopify_products.get(sku)
-
-                    if existing:
-                        product_id, variant_id = existing
-                        self.update_product(product_id, variant_id, row)
-                    else:
-                        self.create_product(row)
-                
-                batch_time = time.time() - batch_start_time
-                
-                # Batch summary
-                print(f"\nBatch {batch_num + 1} complete in {batch_time:.1f}s")
-                print(f"Progress: Created={self.stats['created']}, Updated={self.stats['updated']}, Errors={self.stats['errors']}")
-                
-                # Wait between batches (except for last batch)
-                if batch_num < num_batches - 1:
-                    print(f"Waiting {BATCH_DELAY} seconds before next batch...")
-                    time.sleep(BATCH_DELAY)
-
-            # Print final summary
-            print("\n" + "=" * 60)
-            print("🎉 SYNC COMPLETE!")
-            print("=" * 60)
-            print(f"Total Products Processed: {total_products}")
-            print(f"✓ Created: {self.stats['created']}")
-            print(f"✓ Updated: {self.stats['updated']}")
-            print(f"✗ Errors: {self.stats['errors']}")
-            print(f"⊘ Skipped: {self.stats['skipped']}")
-            print("=" * 60)
-
-            return self.stats['errors'] == 0
-
-        except Exception as e:
-            print(f"\n❌ FATAL ERROR: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-if __name__ == "__main__":
-    # Validate environment variables
-    if not SHOPIFY_STORE or not SHOPIFY_ACCESS_TOKEN:
-        print("ERROR: Missing required environment variables:")
-        print("- SHOPIFY_STORE")
-        print("- SHOPIFY_ACCESS_TOKEN")
-        exit(1)
-
-    syncer = ShopifySync()
-    success = syncer.sync()
-    exit(0 if success else 1)
+if __name__ == '__main__':
+    main()
