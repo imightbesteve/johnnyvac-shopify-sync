@@ -1,5 +1,4 @@
 name: Sync JohnnyVac to Shopify
-
 on:
   # Daily sync at 6 AM UTC (after CSV updates)
   schedule:
@@ -44,7 +43,7 @@ jobs:
           pip install requests
       
       - name: Download previous CSV (for change detection)
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: previous-csv
         continue-on-error: true
@@ -60,7 +59,7 @@ jobs:
           python sync_shopify.py 2>&1 | tee sync.log
       
       - name: Save current CSV (for next comparison)
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: previous-csv
           path: previous_products.csv
@@ -68,7 +67,7 @@ jobs:
       
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sync-logs
           path: '*.log'
