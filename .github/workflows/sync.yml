@@ -1,41 +1,75 @@
 name: Sync JohnnyVac to Shopify
 
 on:
+  # Daily sync at 6 AM UTC (after CSV updates)
   schedule:
-    # Run at 9:00 AM UTC daily (4-5 AM Montreal time, 6 hours after CSV updates)
-    - cron: '0 9 * * *'
-  workflow_dispatch: # Allow manual triggering
+    - cron: '0 6 * * *'
+  
+  # Manual trigger with options
+  workflow_dispatch:
+    inputs:
+      force_full_sync:
+        description: 'Force full sync (ignore changes)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      chunk_number:
+        description: 'Chunk number (0 = all, 1-5 for chunks)'
+        required: false
+        default: '0'
+      total_chunks:
+        description: 'Total chunks (1 = no chunking)'
+        required: false
+        default: '1'
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 180 # 3 hours max
+    timeout-minutes: 90  # 1.5 hours max per chunk
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install requests
-    
-    - name: Run sync script
-      env:
-        SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
-        SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-      run: python sync_shopify.py
-    
-    - name: Upload logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: sync-logs
-        path: |
-          *.log
-        retention-days: 7
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests
+      
+      - name: Download previous CSV (for change detection)
+        uses: actions/download-artifact@v3
+        with:
+          name: previous-csv
+        continue-on-error: true
+      
+      - name: Run sync
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          FORCE_FULL_SYNC: ${{ github.event.inputs.force_full_sync || 'false' }}
+          CHUNK_NUMBER: ${{ github.event.inputs.chunk_number || '0' }}
+          TOTAL_CHUNKS: ${{ github.event.inputs.total_chunks || '1' }}
+        run: |
+          python sync_shopify.py 2>&1 | tee sync.log
+      
+      - name: Save current CSV (for next comparison)
+        uses: actions/upload-artifact@v3
+        with:
+          name: previous-csv
+          path: previous_products.csv
+          retention-days: 7
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: sync-logs
+          path: '*.log'
+          retention-days: 7
