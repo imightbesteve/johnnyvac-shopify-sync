@@ -1,4 +1,5 @@
 name: Sync JohnnyVac to Shopify
+
 on:
   # Daily sync at 6 AM UTC (after CSV updates)
   schedule:
@@ -43,10 +44,10 @@ jobs:
           pip install requests
       
       - name: Download previous CSV (for change detection)
-        uses: actions/download-artifact@v4
-        with:
-          name: previous-csv
-        continue-on-error: true
+        run: |
+          # Previous CSV is already in the repo from last run
+          # No need to download artifact
+          ls -la *.csv || echo "No previous CSV found"
       
       - name: Run sync
         env:
@@ -58,13 +59,6 @@ jobs:
         run: |
           python sync_shopify.py 2>&1 | tee sync.log
       
-      - name: Save current CSV (for next comparison)
-        uses: actions/upload-artifact@v4
-        with:
-          name: previous-csv
-          path: previous_products.csv
-          retention-days: 7
-      
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -72,3 +66,11 @@ jobs:
           name: sync-logs
           path: '*.log'
           retention-days: 7
+      
+      - name: Commit CSV to repo
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add previous_products.csv JVWebProducts.csv || true
+          git diff --staged --quiet || git commit -m "Update CSV from $(date)"
+          git push || true
