@@ -17,6 +17,10 @@ BATCH_SIZE = 100
 RATE_LIMIT_DELAY = 0.5
 BATCH_DELAY = 3
 
+# Chunking support for full syncs
+CHUNK_NUMBER = int(os.environ.get('CHUNK_NUMBER', '0'))
+TOTAL_CHUNKS = int(os.environ.get('TOTAL_CHUNKS', '1'))
+
 # Change detection
 PREVIOUS_CSV_FILE = 'previous_products.csv'
 FORCE_FULL_SYNC = os.environ.get('FORCE_FULL_SYNC', 'false').lower() == 'true'
