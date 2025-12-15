@@ -187,22 +187,54 @@ def get_shopify_products_for_chunk(chunk_products):
     print(f"✓ Loaded {len(all_products)} existing products from Shopify\n")
     return all_products
 
-def get_products_by_sku_list(sku_list):
-    """Fetch specific products by SKU - for small change sets"""
-    print(f"\nChecking {len(sku_list)} products in Shopify...")
-    existing = {}
+def find_product_by_sku_graphql(sku):
+    """Use GraphQL to quickly find a product by SKU"""
+    query = """
+    {
+      productVariants(first: 1, query: "sku:%s") {
+        edges {
+          node {
+            id
+            product {
+              id
+              legacyResourceId
+            }
+            legacyResourceId
+            inventoryItem {
+              id
+              legacyResourceId
+            }
+          }
+        }
+      }
+    }
+    """ % sku
     
-    # For small lists, just fetch all JohnnyVac products (faster than individual queries)
-    if len(sku_list) <= 100:
-        all_products = get_shopify_products_for_chunk([])
-        for sku in sku_list:
-            if sku in all_products:
-                existing[sku] = all_products[sku]
-    else:
-        existing = get_shopify_products_for_chunk([])
+    url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json"
+    headers = {
+        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+        'Content-Type': 'application/json'
+    }
     
-    print(f"✓ Found {len(existing)}/{len(sku_list)} existing products\n")
-    return existing
+    try:
+        response = requests.post(url, headers=headers, json={'query': query}, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
+            if edges:
+                node = edges[0]['node']
+                return {
+                    'id': int(node['product']['legacyResourceId']),
+                    'variant': {
+                        'id': int(node['legacyResourceId']),
+                        'inventory_item_id': int(node['inventoryItem']['legacyResourceId']),
+                        'sku': sku
+                    }
+                }
+    except Exception as e:
+        print(f"  GraphQL error for {sku}: {e}")
+    
+    return None
 
 def get_inventory_location():
     """Get the default inventory location ID (cached)"""
@@ -215,7 +247,7 @@ def get_inventory_location():
             get_inventory_location.location_id = None
     return get_inventory_location.location_id
 
-def create_or_update_product(product_data, existing_products):
+def create_or_update_product(product_data, existing_products, fetch_on_demand=False):
     """Create a new product or update an existing one"""
     sku = product_data['SKU']
     title = product_data.get(f'ProductTitle{LANGUAGE.upper()}', product_data.get('ProductTitleEN', sku))
@@ -230,6 +262,13 @@ def create_or_update_product(product_data, existing_products):
     except ValueError:
         price = 0
         inventory = 0
+    
+    # Fetch product info if not pre-loaded (incremental mode using GraphQL)
+    if fetch_on_demand and sku not in existing_products:
+        product_info = find_product_by_sku_graphql(sku)
+        if product_info:
+            existing_products[sku] = product_info
+        time.sleep(0.3)  # Small delay for GraphQL
     
     if sku in existing_products:
         # Update existing product
@@ -343,11 +382,12 @@ def sync_products():
     # Get existing Shopify products
     if is_chunked:
         # For full syncs, fetch all products for this chunk's processing
+        print("⏳ Fetching existing products for full sync...")
         existing_products = get_shopify_products_for_chunk(products_to_sync)
     else:
-        # For change-only syncs, fetch products by SKU list
-        sku_list = [p['SKU'] for p in products_to_sync]
-        existing_products = get_products_by_sku_list(sku_list)
+        # For incremental syncs, fetch products on-demand (much faster!)
+        print("⚡ Incremental mode - will check products individually\n")
+        existing_products = {}  # Will be populated on-demand
     
     # Process in batches
     total_products = len(products_to_sync)
@@ -373,7 +413,7 @@ def sync_products():
         
         for product in batch:
             try:
-                result = create_or_update_product(product, existing_products)
+                result = create_or_update_product(product, existing_products, fetch_on_demand=not is_chunked)
                 if result == 'created':
                     created_count += 1
                     print(f"✓ Created: {product['SKU']}")
