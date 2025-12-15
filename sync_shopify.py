@@ -1,10 +1,9 @@
 import os
 import csv
 import time
+import json
 import requests
 from datetime import datetime
-from http.client import RemoteDisconnected
-from urllib.error import URLError
 
 # Configuration
 SHOPIFY_STORE = os.environ['SHOPIFY_STORE']
@@ -12,23 +11,29 @@ SHOPIFY_ACCESS_TOKEN = os.environ['SHOPIFY_ACCESS_TOKEN']
 CSV_URL = 'https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv'
 IMAGE_BASE_URL = 'https://www.johnnyvacstock.com/photos/web/'
 
-# Performance settings
-BATCH_SIZE = 100
-RATE_LIMIT_DELAY = 0.5
-BATCH_DELAY = 3
-
-# Chunking support for full syncs
-CHUNK_NUMBER = int(os.environ.get('CHUNK_NUMBER', '0'))
-TOTAL_CHUNKS = int(os.environ.get('TOTAL_CHUNKS', '1'))
-
-# Change detection
+# Files
 PREVIOUS_CSV_FILE = 'previous_products.csv'
-FORCE_FULL_SYNC = os.environ.get('FORCE_FULL_SYNC', 'false').lower() == 'true'
+STATE_FILE = 'sync_state.json'
 
+# Settings
 LANGUAGE = 'en'
+BATCH_SIZE = 50
+RATE_LIMIT_DELAY = 0.5
 
-def make_shopify_request(method, endpoint, data=None, max_retries=3):
-    """Make a Shopify API request with retry logic"""
+def load_state():
+    """Load previous sync state"""
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'r') as f:
+            return json.load(f)
+    return {'last_sync': None, 'products_synced': 0}
+
+def save_state(state):
+    """Save sync state"""
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f)
+
+def make_request(method, endpoint, data=None, max_retries=3):
+    """Make Shopify API request with retry logic"""
     url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/{endpoint}"
     headers = {
         'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
@@ -46,274 +51,261 @@ def make_shopify_request(method, endpoint, data=None, max_retries=3):
             
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 2))
-                print(f"Rate limited. Waiting {retry_after}s...")
+                print(f"  Rate limited. Waiting {retry_after}s...")
                 time.sleep(retry_after)
                 continue
             
             response.raise_for_status()
             return response.json()
             
-        except (RemoteDisconnected, URLError, requests.exceptions.RequestException) as e:
+        except Exception as e:
             if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 5
-                print(f"Connection error (attempt {attempt + 1}/{max_retries}): {e}")
-                print(f"Retrying in {wait_time}s...")
+                wait_time = (attempt + 1) * 3
+                print(f"  Retry {attempt + 1}/{max_retries} in {wait_time}s...")
                 time.sleep(wait_time)
             else:
                 raise
-    
     return None
 
-def download_csv():
-    """Download the CSV from JohnnyVac"""
-    print("Downloading CSV from JohnnyVac...")
-    response = requests.get(CSV_URL, timeout=60)
-    response.raise_for_status()
-    return response.text
-
-def parse_csv(csv_content):
-    """Parse CSV content into list of dictionaries"""
-    lines = csv_content.strip().split('\n')
-    reader = csv.DictReader(lines, delimiter=';')
-    return list(reader)
-
-def load_previous_csv():
-    """Load the previous CSV if it exists"""
-    if not os.path.exists(PREVIOUS_CSV_FILE):
-        return None
-    
-    with open(PREVIOUS_CSV_FILE, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    return {row['SKU']: row for row in parse_csv(content)}
-
-def save_current_csv(csv_content):
-    """Save current CSV for next comparison"""
-    with open(PREVIOUS_CSV_FILE, 'w', encoding='utf-8') as f:
-        f.write(csv_content)
-    print(f"\n✓ Saved current CSV to {PREVIOUS_CSV_FILE}")
-
-def detect_changes(current_products, previous_products_dict):
-    """Detect which products have changed"""
-    if previous_products_dict is None:
-        if FORCE_FULL_SYNC:
-            print("⚠️  FORCE_FULL_SYNC enabled - will sync all products")
-            return current_products
-        else:
-            print("ℹ️  First run - no previous CSV found")
-            print("   Run with FORCE_FULL_SYNC=true to create all products")
-            print("   Or commit an empty previous_products.csv to skip initial sync")
-            return []
-    
-    if FORCE_FULL_SYNC:
-        print("⚠️  FORCE_FULL_SYNC enabled - will sync all products")
-        return current_products
-    
-    changed = []
-    new_products = []
-    
-    # Fields to check for changes
-    check_fields = ['RegularPrice', 'Inventory', 'ProductTitleEN', 'ProductTitleFR', 
-                    'ProductDescriptionEN', 'ProductDescriptionFR']
-    
-    for product in current_products:
-        sku = product['SKU']
-        
-        if sku not in previous_products_dict:
-            # New product
-            new_products.append(product)
-        else:
-            # Check if any important fields changed
-            prev_product = previous_products_dict[sku]
-            has_changes = False
-            
-            for field in check_fields:
-                if product.get(field, '').strip() != prev_product.get(field, '').strip():
-                    has_changes = True
-                    break
-            
-            if has_changes:
-                changed.append(product)
-    
-    print(f"\n📊 Change Detection Summary:")
-    print(f"   Total products in CSV: {len(current_products)}")
-    print(f"   New products: {len(new_products)}")
-    print(f"   Changed products: {len(changed)}")
-    print(f"   Total to sync: {len(new_products) + len(changed)}")
-    
-    return new_products + changed
-
-def get_shopify_products_for_chunk(chunk_products):
-    """Fetch all JohnnyVac products from Shopify - optimized for chunks"""
-    print(f"\nFetching existing Shopify products...")
-    all_products = {}
-    page_info = None
-    page = 1
-    
-    while True:
-        # Build URL with pagination
-        if page_info:
-            url = f"products.json?vendor=JohnnyVac&limit=250&page_info={page_info}"
-        else:
-            url = f"products.json?vendor=JohnnyVac&limit=250"
-        
-        print(f"  Page {page}...", end=' ')
-        result = make_shopify_request('GET', url)
-        
-        if not result or 'products' not in result:
-            break
-        
-        products = result['products']
-        print(f"got {len(products)} products")
-        
-        # Index by SKU
-        for product in products:
-            if product.get('variants'):
-                for variant in product['variants']:
-                    sku = variant.get('sku', '')
-                    if sku:
-                        all_products[sku] = {
-                            'id': product['id'],
-                            'variant': variant
-                        }
-        
-        # Check for next page
-        if len(products) < 250:
-            break
-        
-        page += 1
-        time.sleep(0.5)
-    
-    print(f"✓ Loaded {len(all_products)} existing products from Shopify\n")
-    return all_products
-
-def find_product_by_sku_graphql(sku):
-    """Use GraphQL to quickly find a product by SKU"""
-    query = """
-    {
-      productVariants(first: 1, query: "sku:%s") {
-        edges {
-          node {
-            id
-            product {
-              id
-              legacyResourceId
-            }
-            legacyResourceId
-            inventoryItem {
-              id
-              legacyResourceId
-            }
-          }
-        }
-      }
-    }
-    """ % sku
-    
+def graphql_request(query, variables=None):
+    """Make GraphQL request"""
     url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json"
     headers = {
         'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
         'Content-Type': 'application/json'
     }
     
-    try:
-        response = requests.post(url, headers=headers, json={'query': query}, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            edges = data.get('data', {}).get('productVariants', {}).get('edges', [])
-            if edges:
-                node = edges[0]['node']
-                return {
-                    'id': int(node['product']['legacyResourceId']),
+    payload = {'query': query}
+    if variables:
+        payload['variables'] = variables
+    
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+def fetch_all_shopify_products_bulk():
+    """
+    Fetch ALL products using Shopify's Bulk Operations API
+    This is the proper way to sync large catalogs - no rate limits!
+    """
+    print("Fetching all Shopify products using Bulk Operations API...")
+    
+    # Step 1: Start bulk operation
+    query = """
+    mutation {
+      bulkOperationRunQuery(
+        query: \"\"\"
+        {
+          products(query: "vendor:JohnnyVac") {
+            edges {
+              node {
+                id
+                legacyResourceId
+                variants(first: 1) {
+                  edges {
+                    node {
+                      id
+                      legacyResourceId
+                      sku
+                      inventoryItem {
+                        id
+                        legacyResourceId
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        \"\"\"
+      ) {
+        bulkOperation {
+          id
+          status
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+    
+    result = graphql_request(query)
+    
+    if result.get('data', {}).get('bulkOperationRunQuery', {}).get('userErrors'):
+        errors = result['data']['bulkOperationRunQuery']['userErrors']
+        print(f"  Error starting bulk operation: {errors}")
+        return {}
+    
+    operation_id = result['data']['bulkOperationRunQuery']['bulkOperation']['id']
+    print(f"  ✓ Bulk operation started (ID: {operation_id})")
+    
+    # Step 2: Poll until complete
+    poll_query = """
+    {
+      currentBulkOperation {
+        id
+        status
+        errorCode
+        createdAt
+        completedAt
+        objectCount
+        fileSize
+        url
+        partialDataUrl
+      }
+    }
+    """
+    
+    print("  Waiting for bulk operation to complete...", end='')
+    while True:
+        time.sleep(3)
+        result = graphql_request(poll_query)
+        operation = result['data']['currentBulkOperation']
+        status = operation['status']
+        
+        print('.', end='', flush=True)
+        
+        if status == 'COMPLETED':
+            print(' Done!')
+            url = operation['url']
+            count = operation['objectCount']
+            print(f"  ✓ Fetched {count} products")
+            break
+        elif status in ['FAILED', 'CANCELED']:
+            print(f' Failed!')
+            print(f"  Error: {operation.get('errorCode', 'Unknown')}")
+            return {}
+    
+    # Step 3: Download and parse results
+    print("  Downloading results...")
+    response = requests.get(url)
+    
+    products = {}
+    for line in response.text.strip().split('\n'):
+        if not line:
+            continue
+        obj = json.loads(line)
+        
+        # Parse the JSONL format from bulk operation
+        if obj.get('variants'):
+            variant = obj['variants']['edges'][0]['node']
+            sku = variant.get('sku')
+            if sku:
+                products[sku] = {
+                    'id': int(obj['legacyResourceId']),
                     'variant': {
-                        'id': int(node['legacyResourceId']),
-                        'inventory_item_id': int(node['inventoryItem']['legacyResourceId']),
-                        'sku': sku
+                        'id': int(variant['legacyResourceId']),
+                        'sku': sku,
+                        'inventory_item_id': int(variant['inventoryItem']['legacyResourceId'])
                     }
                 }
-    except Exception as e:
-        print(f"  GraphQL error for {sku}: {e}")
     
-    return None
+    print(f"  ✓ Indexed {len(products)} products by SKU\n")
+    return products
+
+def download_csv():
+    """Download CSV from JohnnyVac"""
+    print("Downloading product CSV from JohnnyVac...")
+    response = requests.get(CSV_URL, timeout=60)
+    response.raise_for_status()
+    print(f"  ✓ Downloaded\n")
+    return response.text
+
+def parse_csv(csv_content):
+    """Parse CSV into list of dicts"""
+    lines = csv_content.strip().split('\n')
+    reader = csv.DictReader(lines, delimiter=';')
+    return list(reader)
+
+def detect_changes(current_products, previous_csv_content):
+    """Detect what changed since last run"""
+    if not previous_csv_content:
+        print("No previous data - will sync all products")
+        return current_products
+    
+    previous_products = {row['SKU']: row for row in parse_csv(previous_csv_content)}
+    
+    changed = []
+    check_fields = ['RegularPrice', 'Inventory', 'ProductTitleEN', 'ProductTitleFR']
+    
+    for product in current_products:
+        sku = product['SKU']
+        
+        if sku not in previous_products:
+            changed.append(product)  # New product
+        else:
+            prev = previous_products[sku]
+            for field in check_fields:
+                if product.get(field, '').strip() != prev.get(field, '').strip():
+                    changed.append(product)
+                    break
+    
+    print(f"Change Detection:")
+    print(f"  Total products: {len(current_products)}")
+    print(f"  Changed/New: {len(changed)}")
+    print(f"  Unchanged: {len(current_products) - len(changed)}\n")
+    
+    return changed
 
 def get_inventory_location():
-    """Get the default inventory location ID (cached)"""
+    """Get inventory location ID (cached)"""
     if not hasattr(get_inventory_location, 'location_id'):
-        result = make_shopify_request('GET', 'locations.json')
-        if result and result.get('locations'):
-            get_inventory_location.location_id = result['locations'][0]['id']
-            print(f"✓ Using inventory location: {result['locations'][0]['name']}\n")
-        else:
-            get_inventory_location.location_id = None
+        result = make_request('GET', 'locations.json')
+        get_inventory_location.location_id = result['locations'][0]['id']
     return get_inventory_location.location_id
 
-def create_or_update_product(product_data, existing_products, fetch_on_demand=False):
-    """Create a new product or update an existing one"""
+def create_or_update_product(product_data, shopify_products):
+    """Create or update a product"""
     sku = product_data['SKU']
-    title = product_data.get(f'ProductTitle{LANGUAGE.upper()}', product_data.get('ProductTitleEN', sku))
+    title = product_data.get(f'ProductTitle{LANGUAGE.upper()}', sku)[:255]
     description = product_data.get(f'ProductDescription{LANGUAGE.upper()}', '')
-    price = product_data.get('RegularPrice', '0')
-    inventory = product_data.get('Inventory', '0')
     
-    # Clean and validate data
     try:
-        price = float(price) if price else 0
-        inventory = int(inventory) if inventory else 0
-    except ValueError:
+        price = float(product_data.get('RegularPrice', 0) or 0)
+        inventory = int(product_data.get('Inventory', 0) or 0)
+    except:
         price = 0
         inventory = 0
     
-    # Fetch product info if not pre-loaded (incremental mode using GraphQL)
-    if fetch_on_demand and sku not in existing_products:
-        product_info = find_product_by_sku_graphql(sku)
-        if product_info:
-            existing_products[sku] = product_info
-        time.sleep(0.3)  # Small delay for GraphQL
-    
-    if sku in existing_products:
-        # Update existing product
-        product_info = existing_products[sku]
-        product_id = product_info['id']
-        variant = product_info['variant']
-        variant_id = variant['id']
-        inventory_item_id = variant.get('inventory_item_id')
+    if sku in shopify_products:
+        # Update existing
+        info = shopify_products[sku]
+        product_id = info['id']
+        variant_id = info['variant']['id']
         
-        # Update product title/description
-        update_payload = {
+        # Update product
+        make_request('PUT', f"products/{product_id}.json", {
             "product": {
                 "id": product_id,
-                "title": title[:255],
+                "title": title,
                 "body_html": description
             }
-        }
-        make_shopify_request('PUT', f"products/{product_id}.json", update_payload)
+        })
         
-        # Update variant price
-        variant_payload = {
+        # Update variant
+        make_request('PUT', f"variants/{variant_id}.json", {
             "variant": {
                 "id": variant_id,
                 "price": str(price)
             }
-        }
-        make_shopify_request('PUT', f"variants/{variant_id}.json", variant_payload)
+        })
         
         # Update inventory
-        if inventory_item_id:
-            location_id = get_inventory_location()
-            if location_id:
-                inventory_payload = {
-                    "location_id": location_id,
-                    "inventory_item_id": inventory_item_id,
-                    "available": inventory
-                }
-                make_shopify_request('POST', 'inventory_levels/set.json', inventory_payload)
+        make_request('POST', 'inventory_levels/set.json', {
+            "location_id": get_inventory_location(),
+            "inventory_item_id": info['variant']['inventory_item_id'],
+            "available": inventory
+        })
         
         return 'updated'
     else:
-        # Create new product
-        product_payload = {
+        # Create new
+        make_request('POST', 'products.json', {
             "product": {
-                "title": title[:255],
+                "title": title,
                 "body_html": description,
                 "vendor": "JohnnyVac",
                 "product_type": product_data.get('ProductCategory', ''),
@@ -323,132 +315,96 @@ def create_or_update_product(product_data, existing_products, fetch_on_demand=Fa
                     "inventory_management": "shopify",
                     "inventory_quantity": inventory
                 }],
-                "images": [{
-                    "src": f"{IMAGE_BASE_URL}{sku}.jpg"
-                }]
+                "images": [{"src": f"{IMAGE_BASE_URL}{sku}.jpg"}]
             }
-        }
-        make_shopify_request('POST', 'products.json', product_payload)
+        })
+        
         return 'created'
 
-def apply_chunking(products, chunk_num, total_chunks):
-    """Split products into chunks for parallel processing"""
-    if total_chunks <= 1 or chunk_num <= 0:
-        return products
-    
-    chunk_size = len(products) // total_chunks
-    start_idx = (chunk_num - 1) * chunk_size
-    
-    if chunk_num == total_chunks:
-        end_idx = len(products)
-    else:
-        end_idx = start_idx + chunk_size
-    
-    return products[start_idx:end_idx]
-
-def sync_products():
-    """Main sync function"""
-    is_chunked = CHUNK_NUMBER > 0 and TOTAL_CHUNKS > 1
-    
+def main():
+    """Main sync process"""
     print(f"\n{'='*70}")
-    if is_chunked:
-        print(f"JohnnyVac Full Sync - Chunk {CHUNK_NUMBER}/{TOTAL_CHUNKS}")
-    else:
-        print(f"JohnnyVac Smart Sync (Changes Only)")
+    print(f"JohnnyVac → Shopify Sync")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*70}\n")
+    
+    start_time = time.time()
+    state = load_state()
     
     # Download current CSV
     csv_content = download_csv()
     current_products = parse_csv(csv_content)
     
-    # For chunked full syncs, skip change detection
-    if is_chunked:
-        print(f"📦 Full sync mode - processing chunk {CHUNK_NUMBER}/{TOTAL_CHUNKS}")
-        products_to_sync = apply_chunking(current_products, CHUNK_NUMBER, TOTAL_CHUNKS)
-        print(f"   This chunk: {len(products_to_sync)} products\n")
-    else:
-        # Regular mode: detect changes only
-        previous_products = load_previous_csv()
-        products_to_sync = detect_changes(current_products, previous_products)
-        
-        if len(products_to_sync) == 0:
-            print("\n✅ No changes detected! All products are up to date.")
-            save_current_csv(csv_content)
-            return
-        
-        print(f"\n🔄 Proceeding to sync {len(products_to_sync)} products...")
+    # Load previous CSV
+    previous_csv = None
+    if os.path.exists(PREVIOUS_CSV_FILE):
+        with open(PREVIOUS_CSV_FILE, 'r') as f:
+            previous_csv = f.read()
     
-    # Get existing Shopify products
-    if is_chunked:
-        # For full syncs, fetch all products for this chunk's processing
-        print("⏳ Fetching existing products for full sync...")
-        existing_products = get_shopify_products_for_chunk(products_to_sync)
-    else:
-        # For incremental syncs, fetch products on-demand (much faster!)
-        print("⚡ Incremental mode - will check products individually\n")
-        existing_products = {}  # Will be populated on-demand
+    # Detect changes
+    products_to_sync = detect_changes(current_products, previous_csv)
+    
+    if not products_to_sync:
+        print("✅ No changes detected - nothing to sync!\n")
+        with open(PREVIOUS_CSV_FILE, 'w') as f:
+            f.write(csv_content)
+        return
+    
+    print(f"Syncing {len(products_to_sync)} products...\n")
+    
+    # Fetch existing products using Bulk API
+    shopify_products = fetch_all_shopify_products_bulk()
     
     # Process in batches
-    total_products = len(products_to_sync)
-    total_batches = (total_products + BATCH_SIZE - 1) // BATCH_SIZE
+    created = 0
+    updated = 0
+    errors = 0
     
-    created_count = 0
-    updated_count = 0
-    error_count = 0
-    start_time = time.time()
+    total_batches = (len(products_to_sync) + BATCH_SIZE - 1) // BATCH_SIZE
     
-    for batch_num in range(1, total_batches + 1):
-        start_idx = (batch_num - 1) * BATCH_SIZE
-        end_idx = min(start_idx + BATCH_SIZE, total_products)
+    for batch_num in range(total_batches):
+        start_idx = batch_num * BATCH_SIZE
+        end_idx = min(start_idx + BATCH_SIZE, len(products_to_sync))
         batch = products_to_sync[start_idx:end_idx]
         
-        elapsed_time = time.time() - start_time
-        
-        print(f"\n{'='*70}")
-        print(f"Batch {batch_num}/{total_batches} ({(batch_num/total_batches*100):.1f}%)")
-        print(f"Products {start_idx + 1} to {end_idx} of {total_products}")
-        print(f"Elapsed: {elapsed_time/60:.1f}m | Created: {created_count} | Updated: {updated_count}")
-        print(f"{'='*70}\n")
+        print(f"Batch {batch_num + 1}/{total_batches} (products {start_idx + 1}-{end_idx})")
         
         for product in batch:
             try:
-                result = create_or_update_product(product, existing_products, fetch_on_demand=not is_chunked)
+                result = create_or_update_product(product, shopify_products)
                 if result == 'created':
-                    created_count += 1
-                    print(f"✓ Created: {product['SKU']}")
+                    created += 1
+                    print(f"  ✓ Created: {product['SKU']}")
                 else:
-                    updated_count += 1
-                    print(f"↻ Updated: {product['SKU']}")
+                    updated += 1
+                    print(f"  ↻ Updated: {product['SKU']}")
                 
                 time.sleep(RATE_LIMIT_DELAY)
-                
             except Exception as e:
-                error_count += 1
-                print(f"✗ Error with {product['SKU']}: {str(e)}")
+                errors += 1
+                print(f"  ✗ Error {product['SKU']}: {e}")
         
-        if batch_num < total_batches:
-            print(f"\nWaiting {BATCH_DELAY}s before next batch...")
-            time.sleep(BATCH_DELAY)
+        print()
     
-    # Save current CSV for next run (only in non-chunked mode)
-    if not is_chunked:
-        save_current_csv(csv_content)
+    # Save state
+    with open(PREVIOUS_CSV_FILE, 'w') as f:
+        f.write(csv_content)
+    
+    state['last_sync'] = datetime.now().isoformat()
+    state['products_synced'] = created + updated
+    save_state(state)
     
     # Summary
-    total_time = time.time() - start_time
-    print(f"\n{'='*70}")
-    if is_chunked:
-        print(f"✅ Chunk {CHUNK_NUMBER}/{TOTAL_CHUNKS} Complete!")
-    else:
-        print(f"✅ Sync Complete!")
+    elapsed = time.time() - start_time
     print(f"{'='*70}")
-    print(f"Created: {created_count}")
-    print(f"Updated: {updated_count}")
-    print(f"Errors: {error_count}")
-    print(f"Total time: {total_time/60:.1f} minutes")
+    print(f"✅ Sync Complete!")
+    print(f"{'='*70}")
+    print(f"Created:  {created}")
+    print(f"Updated:  {updated}")
+    print(f"Errors:   {errors}")
+    print(f"Time:     {elapsed/60:.1f} minutes")
     print(f"Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*70}\n")
 
 if __name__ == "__main__":
-    sync_products()
+    main()
