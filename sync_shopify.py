@@ -139,41 +139,63 @@ def detect_changes(current_products, previous_products_dict):
     
     return new_products + changed
 
-def get_shopify_products_by_sku(sku_list):
-    """Fetch specific products from Shopify by SKU - OPTIMIZED"""
-    if not sku_list:
-        return {}
+def get_shopify_products_for_chunk(chunk_products):
+    """Fetch all JohnnyVac products from Shopify - optimized for chunks"""
+    print(f"\nFetching existing Shopify products...")
+    all_products = {}
+    page_info = None
+    page = 1
     
+    while True:
+        # Build URL with pagination
+        if page_info:
+            url = f"products.json?vendor=JohnnyVac&limit=250&page_info={page_info}"
+        else:
+            url = f"products.json?vendor=JohnnyVac&limit=250"
+        
+        print(f"  Page {page}...", end=' ')
+        result = make_shopify_request('GET', url)
+        
+        if not result or 'products' not in result:
+            break
+        
+        products = result['products']
+        print(f"got {len(products)} products")
+        
+        # Index by SKU
+        for product in products:
+            if product.get('variants'):
+                for variant in product['variants']:
+                    sku = variant.get('sku', '')
+                    if sku:
+                        all_products[sku] = {
+                            'id': product['id'],
+                            'variant': variant
+                        }
+        
+        # Check for next page
+        if len(products) < 250:
+            break
+        
+        page += 1
+        time.sleep(0.5)
+    
+    print(f"✓ Loaded {len(all_products)} existing products from Shopify\n")
+    return all_products
+
+def get_products_by_sku_list(sku_list):
+    """Fetch specific products by SKU - for small change sets"""
     print(f"\nChecking {len(sku_list)} products in Shopify...")
     existing = {}
     
-    # Process in batches of 50 SKUs
-    for i in range(0, len(sku_list), 50):
-        batch_skus = sku_list[i:i+50]
-        print(f"  Checking batch {i//50 + 1}/{(len(sku_list) + 49)//50}...", end=' ')
-        
-        batch_found = 0
-        for sku in batch_skus:
-            try:
-                result = make_shopify_request('GET', f'products.json?limit=1&fields=id,variants&vendor=JohnnyVac')
-                
-                # Search through results for matching SKU
-                if result and result.get('products'):
-                    for product in result['products']:
-                        for variant in product.get('variants', []):
-                            if variant.get('sku') == sku:
-                                existing[sku] = {
-                                    'id': product['id'],
-                                    'variant': variant
-                                }
-                                batch_found += 1
-                                break
-                
-                time.sleep(0.3)  # Rate limiting
-            except Exception as e:
-                print(f"\n  Error fetching {sku}: {e}")
-        
-        print(f"found {batch_found}")
+    # For small lists, just fetch all JohnnyVac products (faster than individual queries)
+    if len(sku_list) <= 100:
+        all_products = get_shopify_products_for_chunk([])
+        for sku in sku_list:
+            if sku in all_products:
+                existing[sku] = all_products[sku]
+    else:
+        existing = get_shopify_products_for_chunk([])
     
     print(f"✓ Found {len(existing)}/{len(sku_list)} existing products\n")
     return existing
@@ -266,10 +288,30 @@ def create_or_update_product(product_data, existing_products):
         make_shopify_request('POST', 'products.json', product_payload)
         return 'created'
 
+def apply_chunking(products, chunk_num, total_chunks):
+    """Split products into chunks for parallel processing"""
+    if total_chunks <= 1 or chunk_num <= 0:
+        return products
+    
+    chunk_size = len(products) // total_chunks
+    start_idx = (chunk_num - 1) * chunk_size
+    
+    if chunk_num == total_chunks:
+        end_idx = len(products)
+    else:
+        end_idx = start_idx + chunk_size
+    
+    return products[start_idx:end_idx]
+
 def sync_products():
     """Main sync function"""
+    is_chunked = CHUNK_NUMBER > 0 and TOTAL_CHUNKS > 1
+    
     print(f"\n{'='*70}")
-    print(f"JohnnyVac to Shopify Smart Sync")
+    if is_chunked:
+        print(f"JohnnyVac Full Sync - Chunk {CHUNK_NUMBER}/{TOTAL_CHUNKS}")
+    else:
+        print(f"JohnnyVac Smart Sync (Changes Only)")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*70}\n")
     
@@ -277,20 +319,31 @@ def sync_products():
     csv_content = download_csv()
     current_products = parse_csv(csv_content)
     
-    # Load previous CSV and detect changes
-    previous_products = load_previous_csv()
-    products_to_sync = detect_changes(current_products, previous_products)
+    # For chunked full syncs, skip change detection
+    if is_chunked:
+        print(f"📦 Full sync mode - processing chunk {CHUNK_NUMBER}/{TOTAL_CHUNKS}")
+        products_to_sync = apply_chunking(current_products, CHUNK_NUMBER, TOTAL_CHUNKS)
+        print(f"   This chunk: {len(products_to_sync)} products\n")
+    else:
+        # Regular mode: detect changes only
+        previous_products = load_previous_csv()
+        products_to_sync = detect_changes(current_products, previous_products)
+        
+        if len(products_to_sync) == 0:
+            print("\n✅ No changes detected! All products are up to date.")
+            save_current_csv(csv_content)
+            return
+        
+        print(f"\n🔄 Proceeding to sync {len(products_to_sync)} products...")
     
-    if len(products_to_sync) == 0:
-        print("\n✅ No changes detected! All products are up to date.")
-        save_current_csv(csv_content)
-        return
-    
-    print(f"\n🔄 Proceeding to sync {len(products_to_sync)} products...")
-    
-    # Get existing Shopify products for changed SKUs only
-    sku_list = [p['SKU'] for p in products_to_sync]
-    existing_products = get_shopify_products_by_sku(sku_list)
+    # Get existing Shopify products
+    if is_chunked:
+        # For full syncs, fetch all products for this chunk's processing
+        existing_products = get_shopify_products_for_chunk(products_to_sync)
+    else:
+        # For change-only syncs, fetch products by SKU list
+        sku_list = [p['SKU'] for p in products_to_sync]
+        existing_products = get_products_by_sku_list(sku_list)
     
     # Process in batches
     total_products = len(products_to_sync)
@@ -334,13 +387,17 @@ def sync_products():
             print(f"\nWaiting {BATCH_DELAY}s before next batch...")
             time.sleep(BATCH_DELAY)
     
-    # Save current CSV for next run
-    save_current_csv(csv_content)
+    # Save current CSV for next run (only in non-chunked mode)
+    if not is_chunked:
+        save_current_csv(csv_content)
     
     # Summary
     total_time = time.time() - start_time
     print(f"\n{'='*70}")
-    print(f"✅ Sync Complete!")
+    if is_chunked:
+        print(f"✅ Chunk {CHUNK_NUMBER}/{TOTAL_CHUNKS} Complete!")
+    else:
+        print(f"✅ Sync Complete!")
     print(f"{'='*70}")
     print(f"Created: {created_count}")
     print(f"Updated: {updated_count}")
