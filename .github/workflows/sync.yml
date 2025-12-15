@@ -1,38 +1,21 @@
 name: Sync JohnnyVac to Shopify
 
 on:
-  # Daily sync at 6 AM UTC (after CSV updates)
   schedule:
-    - cron: '0 6 * * *'
-  
-  # Manual trigger with options
+    - cron: '0 6 * * *'  # Daily at 6 AM UTC
   workflow_dispatch:
     inputs:
       force_full_sync:
-        description: 'Force full sync (ignore changes)'
+        description: 'Force full sync (ignore change detection)'
         required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-      chunk_number:
-        description: 'Chunk number (0 = all, 1-5 for chunks)'
-        required: false
-        default: '0'
-      total_chunks:
-        description: 'Total chunks (1 = no chunking)'
-        required: false
-        default: '1'
+        type: boolean
+        default: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # 1.5 hours max per chunk
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
       
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -40,37 +23,19 @@ jobs:
           python-version: '3.10'
       
       - name: Install dependencies
-        run: |
-          pip install requests
-      
-      - name: Download previous CSV (for change detection)
-        run: |
-          # Previous CSV is already in the repo from last run
-          # No need to download artifact
-          ls -la *.csv || echo "No previous CSV found"
+        run: pip install requests
       
       - name: Run sync
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
           FORCE_FULL_SYNC: ${{ github.event.inputs.force_full_sync || 'false' }}
-          CHUNK_NUMBER: ${{ github.event.inputs.chunk_number || '0' }}
-          TOTAL_CHUNKS: ${{ github.event.inputs.total_chunks || '1' }}
-        run: |
-          python sync_shopify.py 2>&1 | tee sync.log
+        run: python sync_shopify.py
+        timeout-minutes: 20
       
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sync-logs
-          path: '*.log'
-          retention-days: 7
-      
-      - name: Commit CSV to repo
+      - name: Commit updated CSV state
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add previous_products.csv JVWebProducts.csv || true
-          git diff --staged --quiet || git commit -m "Update CSV from $(date)"
-          git push || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add previous_products.csv
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update product sync state [skip ci]" && git push)
