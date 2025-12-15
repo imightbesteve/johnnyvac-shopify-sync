@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force_full_sync:
-        description: 'Force full sync (ignore change detection)'
+        description: 'Force full sync (use parallel chunks)'
         required: false
         type: boolean
         default: false
@@ -15,7 +15,9 @@ permissions:
   contents: write
 
 jobs:
-  sync:
+  # Regular daily sync (changes only)
+  sync-changes:
+    if: ${{ github.event.inputs.force_full_sync != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -28,11 +30,10 @@ jobs:
       - name: Install dependencies
         run: pip install requests
       
-      - name: Run sync
+      - name: Run incremental sync
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-          FORCE_FULL_SYNC: ${{ github.event.inputs.force_full_sync || 'false' }}
         run: python sync_shopify.py
         timeout-minutes: 20
       
@@ -42,3 +43,66 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add previous_products.csv
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update product sync state [skip ci]" && git push)
+
+  # Full sync with parallel chunks
+  full-sync:
+    if: ${{ github.event.inputs.force_full_sync == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 9
+      matrix:
+        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Sync chunk ${{ matrix.chunk }}/9
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          CHUNK_NUMBER: ${{ matrix.chunk }}
+          TOTAL_CHUNKS: 9
+          FORCE_FULL_SYNC: 'true'
+        run: python sync_shopify.py
+        timeout-minutes: 20
+
+  # Update CSV after full sync completes
+  finalize-full-sync:
+    if: ${{ github.event.inputs.force_full_sync == 'true' }}
+    needs: full-sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Download and save CSV
+        run: |
+          python3 << 'EOF'
+          import requests
+          CSV_URL = 'https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv'
+          response = requests.get(CSV_URL, timeout=60)
+          with open('previous_products.csv', 'w') as f:
+              f.write(response.text)
+          print("✓ Saved current CSV state")
+          EOF
+      
+      - name: Commit updated CSV state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add previous_products.csv
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update product sync state after full sync [skip ci]" && git push)
