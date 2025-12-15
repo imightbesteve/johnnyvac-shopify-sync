@@ -17,15 +17,11 @@ BATCH_SIZE = 100
 RATE_LIMIT_DELAY = 0.5
 BATCH_DELAY = 3
 
-# Chunking support (set via environment variable)
-CHUNK_NUMBER = int(os.environ.get('CHUNK_NUMBER', '0'))  # 0 = all products
-TOTAL_CHUNKS = int(os.environ.get('TOTAL_CHUNKS', '1'))   # 1 = no chunking
-
 # Change detection
 PREVIOUS_CSV_FILE = 'previous_products.csv'
 FORCE_FULL_SYNC = os.environ.get('FORCE_FULL_SYNC', 'false').lower() == 'true'
 
-LANGUAGE = 'en'  # or 'fr'
+LANGUAGE = 'en'
 
 def make_shopify_request(method, endpoint, data=None, max_retries=3):
     """Make a Shopify API request with retry logic"""
@@ -91,16 +87,26 @@ def save_current_csv(csv_content):
     """Save current CSV for next comparison"""
     with open(PREVIOUS_CSV_FILE, 'w', encoding='utf-8') as f:
         f.write(csv_content)
-    print(f"Saved current CSV to {PREVIOUS_CSV_FILE}")
+    print(f"\n✓ Saved current CSV to {PREVIOUS_CSV_FILE}")
 
 def detect_changes(current_products, previous_products_dict):
     """Detect which products have changed"""
-    if previous_products_dict is None or FORCE_FULL_SYNC:
-        print("No previous CSV found or FORCE_FULL_SYNC set - syncing all products")
-        return current_products, []
+    if previous_products_dict is None:
+        if FORCE_FULL_SYNC:
+            print("⚠️  FORCE_FULL_SYNC enabled - will sync all products")
+            return current_products
+        else:
+            print("ℹ️  First run - no previous CSV found")
+            print("   Run with FORCE_FULL_SYNC=true to create all products")
+            print("   Or commit an empty previous_products.csv to skip initial sync")
+            return []
+    
+    if FORCE_FULL_SYNC:
+        print("⚠️  FORCE_FULL_SYNC enabled - will sync all products")
+        return current_products
     
     changed = []
-    unchanged = []
+    new_products = []
     
     # Fields to check for changes
     check_fields = ['RegularPrice', 'Inventory', 'ProductTitleEN', 'ProductTitleFR', 
@@ -111,7 +117,7 @@ def detect_changes(current_products, previous_products_dict):
         
         if sku not in previous_products_dict:
             # New product
-            changed.append(product)
+            new_products.append(product)
         else:
             # Check if any important fields changed
             prev_product = previous_products_dict[sku]
@@ -124,69 +130,64 @@ def detect_changes(current_products, previous_products_dict):
             
             if has_changes:
                 changed.append(product)
-            else:
-                unchanged.append(product)
     
     print(f"\n📊 Change Detection Summary:")
-    print(f"   Total products: {len(current_products)}")
-    print(f"   Changed/New: {len(changed)}")
-    print(f"   Unchanged: {len(unchanged)}")
-    print()
+    print(f"   Total products in CSV: {len(current_products)}")
+    print(f"   New products: {len(new_products)}")
+    print(f"   Changed products: {len(changed)}")
+    print(f"   Total to sync: {len(new_products) + len(changed)}")
     
-    return changed, unchanged
+    return new_products + changed
 
-def apply_chunking(products):
-    """Apply chunking if configured"""
-    if TOTAL_CHUNKS <= 1 or CHUNK_NUMBER <= 0:
-        return products
+def get_shopify_products_by_sku(sku_list):
+    """Fetch specific products from Shopify by SKU - OPTIMIZED"""
+    if not sku_list:
+        return {}
     
-    chunk_size = len(products) // TOTAL_CHUNKS
-    start_idx = (CHUNK_NUMBER - 1) * chunk_size
+    print(f"\nChecking {len(sku_list)} products in Shopify...")
+    existing = {}
     
-    if CHUNK_NUMBER == TOTAL_CHUNKS:
-        # Last chunk gets remaining products
-        end_idx = len(products)
-    else:
-        end_idx = start_idx + chunk_size
+    # Process in batches of 50 SKUs
+    for i in range(0, len(sku_list), 50):
+        batch_skus = sku_list[i:i+50]
+        print(f"  Checking batch {i//50 + 1}/{(len(sku_list) + 49)//50}...", end=' ')
+        
+        batch_found = 0
+        for sku in batch_skus:
+            try:
+                result = make_shopify_request('GET', f'products.json?limit=1&fields=id,variants&vendor=JohnnyVac')
+                
+                # Search through results for matching SKU
+                if result and result.get('products'):
+                    for product in result['products']:
+                        for variant in product.get('variants', []):
+                            if variant.get('sku') == sku:
+                                existing[sku] = {
+                                    'id': product['id'],
+                                    'variant': variant
+                                }
+                                batch_found += 1
+                                break
+                
+                time.sleep(0.3)  # Rate limiting
+            except Exception as e:
+                print(f"\n  Error fetching {sku}: {e}")
+        
+        print(f"found {batch_found}")
     
-    chunk = products[start_idx:end_idx]
-    print(f"\n🔹 Chunking enabled: Processing chunk {CHUNK_NUMBER}/{TOTAL_CHUNKS}")
-    print(f"   Chunk range: {start_idx + 1} to {end_idx} ({len(chunk)} products)\n")
-    
-    return chunk
+    print(f"✓ Found {len(existing)}/{len(sku_list)} existing products\n")
+    return existing
 
-def get_all_shopify_products():
-    """Fetch all existing products from Shopify"""
-    print("Fetching existing Shopify products...")
-    all_products = {}
-    
-    params = {'limit': 250}
-    page = 1
-    
-    while True:
-        print(f"Fetching page {page}...", end=' ')
-        result = make_shopify_request('GET', f"products.json?limit={params['limit']}")
-        
-        if not result or 'products' not in result:
-            break
-        
-        products = result['products']
-        print(f"Got {len(products)} products")
-        
-        for product in products:
-            if product.get('variants') and len(product['variants']) > 0:
-                sku = product['variants'][0].get('sku', '')
-                if sku:
-                    all_products[sku] = product
-        
-        if len(products) < params['limit']:
-            break
-        
-        page += 1
-        time.sleep(0.5)
-    
-    print(f"Found {len(all_products)} existing products in Shopify\n")
-    return all_products
+def get_inventory_location():
+    """Get the default inventory location ID (cached)"""
+    if not hasattr(get_inventory_location, 'location_id'):
+        result = make_shopify_request('GET', 'locations.json')
+        if result and result.get('locations'):
+            get_inventory_location.location_id = result['locations'][0]['id']
+            print(f"✓ Using inventory location: {result['locations'][0]['name']}\n")
+        else:
+            get_inventory_location.location_id = None
+    return get_inventory_location.location_id
 
 def create_or_update_product(product_data, existing_products):
     """Create a new product or update an existing one"""
@@ -204,31 +205,15 @@ def create_or_update_product(product_data, existing_products):
         price = 0
         inventory = 0
     
-    product_payload = {
-        "product": {
-            "title": title[:255],
-            "body_html": description,
-            "vendor": "JohnnyVac",
-            "product_type": product_data.get('ProductCategory', ''),
-            "variants": [{
-                "sku": sku,
-                "price": str(price),
-                "inventory_management": "shopify",
-                "inventory_quantity": inventory
-            }],
-            "images": [{
-                "src": f"{IMAGE_BASE_URL}{sku}.jpg"
-            }]
-        }
-    }
-    
     if sku in existing_products:
         # Update existing product
-        shopify_product = existing_products[sku]
-        product_id = shopify_product['id']
-        variant_id = shopify_product['variants'][0]['id']
+        product_info = existing_products[sku]
+        product_id = product_info['id']
+        variant = product_info['variant']
+        variant_id = variant['id']
+        inventory_item_id = variant.get('inventory_item_id')
         
-        # Update product details
+        # Update product title/description
         update_payload = {
             "product": {
                 "id": product_id,
@@ -238,26 +223,46 @@ def create_or_update_product(product_data, existing_products):
         }
         make_shopify_request('PUT', f"products/{product_id}.json", update_payload)
         
-        # Update variant (price, inventory)
+        # Update variant price
         variant_payload = {
             "variant": {
                 "id": variant_id,
-                "price": str(price),
-                "inventory_management": "shopify"
+                "price": str(price)
             }
         }
         make_shopify_request('PUT', f"variants/{variant_id}.json", variant_payload)
         
         # Update inventory
-        inventory_payload = {
-            "location_id": shopify_product['variants'][0].get('inventory_item_id'),
-            "inventory_item_id": shopify_product['variants'][0].get('inventory_item_id'),
-            "available": inventory
-        }
+        if inventory_item_id:
+            location_id = get_inventory_location()
+            if location_id:
+                inventory_payload = {
+                    "location_id": location_id,
+                    "inventory_item_id": inventory_item_id,
+                    "available": inventory
+                }
+                make_shopify_request('POST', 'inventory_levels/set.json', inventory_payload)
         
         return 'updated'
     else:
         # Create new product
+        product_payload = {
+            "product": {
+                "title": title[:255],
+                "body_html": description,
+                "vendor": "JohnnyVac",
+                "product_type": product_data.get('ProductCategory', ''),
+                "variants": [{
+                    "sku": sku,
+                    "price": str(price),
+                    "inventory_management": "shopify",
+                    "inventory_quantity": inventory
+                }],
+                "images": [{
+                    "src": f"{IMAGE_BASE_URL}{sku}.jpg"
+                }]
+            }
+        }
         make_shopify_request('POST', 'products.json', product_payload)
         return 'created'
 
@@ -274,18 +279,18 @@ def sync_products():
     
     # Load previous CSV and detect changes
     previous_products = load_previous_csv()
-    products_to_sync, unchanged = detect_changes(current_products, previous_products)
-    
-    # Apply chunking if configured
-    products_to_sync = apply_chunking(products_to_sync)
+    products_to_sync = detect_changes(current_products, previous_products)
     
     if len(products_to_sync) == 0:
-        print("✅ No changes detected! All products are up to date.")
+        print("\n✅ No changes detected! All products are up to date.")
         save_current_csv(csv_content)
         return
     
-    # Get existing Shopify products
-    existing_products = get_all_shopify_products()
+    print(f"\n🔄 Proceeding to sync {len(products_to_sync)} products...")
+    
+    # Get existing Shopify products for changed SKUs only
+    sku_list = [p['SKU'] for p in products_to_sync]
+    existing_products = get_shopify_products_by_sku(sku_list)
     
     # Process in batches
     total_products = len(products_to_sync)
@@ -302,15 +307,11 @@ def sync_products():
         batch = products_to_sync[start_idx:end_idx]
         
         elapsed_time = time.time() - start_time
-        avg_time_per_batch = elapsed_time / batch_num if batch_num > 0 else 0
-        remaining_batches = total_batches - batch_num
-        estimated_remaining = avg_time_per_batch * remaining_batches
         
         print(f"\n{'='*70}")
         print(f"Batch {batch_num}/{total_batches} ({(batch_num/total_batches*100):.1f}%)")
-        print(f"Products {start_idx + 1} to {end_idx}")
-        print(f"Elapsed: {elapsed_time/60:.1f}m | Est. remaining: {estimated_remaining/60:.1f}m")
-        print(f"Created: {created_count} | Updated: {updated_count} | Errors: {error_count}")
+        print(f"Products {start_idx + 1} to {end_idx} of {total_products}")
+        print(f"Elapsed: {elapsed_time/60:.1f}m | Created: {created_count} | Updated: {updated_count}")
         print(f"{'='*70}\n")
         
         for product in batch:
@@ -339,7 +340,7 @@ def sync_products():
     # Summary
     total_time = time.time() - start_time
     print(f"\n{'='*70}")
-    print(f"Sync Complete!")
+    print(f"✅ Sync Complete!")
     print(f"{'='*70}")
     print(f"Created: {created_count}")
     print(f"Updated: {updated_count}")
