@@ -3,36 +3,33 @@ name: Sync JohnnyVac to Shopify
 on:
   schedule:
     - cron: '0 6 * * *'  # Daily at 6 AM UTC
-  workflow_dispatch:
-
-permissions:
-  contents: write
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install requests
       
-      - name: Run sync
+      - name: Run sync script
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-        run: python sync_shopify.py
-      
-      - name: Commit updated state
-        if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add previous_products.csv sync_state.json || true
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update sync state [skip ci]" && git push) || true
+          # Replace tokens in script
+          sed -i "s|YOUR_TOKEN_HERE|$SHOPIFY_ACCESS_TOKEN|g" sync_shopify.py
+          sed -i "s|kingsway-janitorial.myshopify.com|$SHOPIFY_STORE|g" sync_shopify.py
+          
+          # Run sync
+          python sync_shopify.py
