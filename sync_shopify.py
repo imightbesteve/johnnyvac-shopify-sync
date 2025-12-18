@@ -10,8 +10,10 @@ from io import StringIO
 from datetime import datetime
 
 # Configuration
-SHOPIFY_STORE = "kingsway-janitorial.myshopify.com"
-SHOPIFY_ACCESS_TOKEN = "YOUR_TOKEN_HERE"  # Will be replaced by GitHub Actions
+import os
+
+SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', 'kingsway-janitorial.myshopify.com')
+SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', 'YOUR_TOKEN_HERE')
 JOHNNYVAC_CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv"
 IMAGE_BASE_URL = "https://www.johnnyvacstock.com/photos/web/"
 
@@ -28,37 +30,59 @@ def get_all_shopify_products():
     url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
     page_count = 0
+    max_pages = 100  # Safety limit
+    seen_urls = set()
     
-    while url:
+    while url and page_count < max_pages:
+        # Detect infinite loops
+        if url in seen_urls:
+            print(f"\n⚠️  Detected pagination loop, stopping at page {page_count}")
+            break
+        seen_urls.add(url)
+        
         try:
             response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             data = response.json()
             
+            batch_products = data.get('products', [])
+            if not batch_products:
+                # No more products
+                break
+            
             page_count += 1
-            for product in data.get('products', []):
+            for product in batch_products:
                 # Index by SKU from first variant
                 if product.get('variants'):
                     sku = product['variants'][0].get('sku', '').strip()
                     if sku:
                         products[sku] = product
             
-            print(f"  Page {page_count}: {len(products)} products loaded...", end='\r')
+            print(f"  Page {page_count}: {len(products)} total products ({len(batch_products)} this page)...", end='\r')
             
-            # Check for next page
+            # Check for next page using Shopify's Link header
             link_header = response.headers.get('Link', '')
-            if 'rel="next"' in link_header:
-                next_url = link_header.split(';')[0].strip('<>')
-                url = next_url
+            url = None  # Reset
+            
+            if link_header:
+                # Parse Link header for rel="next"
+                links = link_header.split(',')
+                for link in links:
+                    if 'rel="next"' in link:
+                        url = link.split(';')[0].strip().strip('<>')
+                        break
+            
+            if url:
                 time.sleep(0.5)  # Rate limit protection
-            else:
-                url = None
                 
         except Exception as e:
             print(f"\n❌ Error fetching products: {e}")
             break
     
-    print(f"\n  ✓ Loaded {len(products)} products from Shopify")
+    if page_count >= max_pages:
+        print(f"\n⚠️  Reached maximum page limit ({max_pages})")
+    
+    print(f"\n  ✓ Loaded {len(products)} unique products from Shopify")
     return products
 
 def download_johnnyvac_csv():
