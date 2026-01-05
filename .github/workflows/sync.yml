@@ -1,13 +1,29 @@
 name: Sync JohnnyVac to Shopify
-
 on:
   schedule:
-    - cron: '0 6 * * *'  # Daily at 6 AM UTC
-  workflow_dispatch:  # Allow manual trigger
+    # Run 5 times per week on alternating schedule
+    - cron: '0 6 * * 1,2,3,4,5'  # Mon-Fri at 6 AM UTC
+  workflow_dispatch:  # Manual trigger with options
+    inputs:
+      category_mode:
+        description: 'Category Mode'
+        required: false
+        default: 'alternate'
+        type: choice
+        options:
+          - alternate  # Group A: Mon/Wed/Fri, Group B: Tue/Thu/Sat
+          - rotate     # Auto-rotate through categories daily
+          - all        # Sync all categories (may timeout)
+          - specific   # Enter specific category name below
+      category_name:
+        description: 'Specific Category Name (if mode=specific)'
+        required: false
+        type: string
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     
     steps:
       - name: Checkout code
@@ -26,10 +42,37 @@ jobs:
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          CATEGORY_MODE: ${{ github.event.inputs.category_mode || 'alternate' }}
+          CATEGORY_NAME: ${{ github.event.inputs.category_name || '' }}
         run: |
-          # Replace tokens in script
-          sed -i "s|YOUR_TOKEN_HERE|$SHOPIFY_ACCESS_TOKEN|g" sync_shopify.py
-          sed -i "s|kingsway-janitorial.myshopify.com|$SHOPIFY_STORE|g" sync_shopify.py
-          
-          # Run sync
+          # If specific category requested, use category name
+          if [ "$CATEGORY_MODE" = "specific" ] && [ -n "$CATEGORY_NAME" ]; then
+            export CATEGORY_MODE="$CATEGORY_NAME"
+          fi
           python sync_shopify.py
+```
+
+## 📅 How the Alternating Schedule Works
+
+### **Automatic Split:**
+The script automatically divides your categories into two equal groups based on the number of products:
+
+**Example with 7 categories:**
+```
+Group A (Mon/Wed/Fri):          Group B (Tue/Thu):
+├─ Floor Care (2,340)           ├─ Paper Products (1,100)
+├─ Chemicals (1,850)            ├─ Equipment (890)
+├─ Vacuums (1,420)              ├─ Accessories (650)
+└─ Safety (264)                 └─ (Total: 2,640)
+   (Total: 5,874)
+```
+
+### **Weekly Pattern:**
+```
+Monday    → Group A (Floor Care, Chemicals, Vacuums, Safety)
+Tuesday   → Group B (Paper Products, Equipment, Accessories)
+Wednesday → Group A (Floor Care, Chemicals, Vacuums, Safety)
+Thursday  → Group B (Paper Products, Equipment, Accessories)
+Friday    → Group A (Floor Care, Chemicals, Vacuums, Safety)
+Saturday  → Group B runs if you trigger manually
+Sunday    → Group B runs if you trigger manually
