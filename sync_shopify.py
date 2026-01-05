@@ -1,27 +1,78 @@
 """
-JohnnyVac to Shopify Sync Script
-Always verifies against actual Shopify inventory (CSV is source of truth)
+JohnnyVac to Shopify Sync Script - Category Batching Mode
+- Processes one category per run to avoid timeouts
+- Automatically cycles through categories daily
+- Tracks progress via environment variable or falls back to date-based rotation
 """
 import requests
 import csv
 import time
 import json
-from io import StringIO
+import os
+import sys
 from datetime import datetime
+from collections import defaultdict
 
 # Configuration
-import os
-
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', 'kingsway-janitorial.myshopify.com')
 SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', 'YOUR_TOKEN_HERE')
 JOHNNYVAC_CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv"
 IMAGE_BASE_URL = "https://www.johnnyvacstock.com/photos/web/"
 
-# Sync settings
+# Settings
 BATCH_SIZE = 50
-RATE_LIMIT_DELAY = 1.0
-BATCH_DELAY = 10
 LANGUAGE = 'en'
+MAX_RUNTIME_SECONDS = 5.5 * 3600
+START_TIME = time.time()
+
+# Category Batching Configuration
+CATEGORY_MODE = os.environ.get('CATEGORY_MODE', 'alternate')  # 'alternate', 'rotate', 'all', or specific category name
+SYNC_MODE = os.environ.get('SYNC_MODE', 'daily')  # Only used for 'rotate' mode
+
+LOCATION_ID = None
+
+def check_time_limit():
+    """Returns True if we are approaching the GitHub Actions time limit"""
+    elapsed = time.time() - START_TIME
+    if elapsed > MAX_RUNTIME_SECONDS:
+        print(f"\n⚠️  Time limit reached ({elapsed/3600:.2f} hours). Stopping gracefully.")
+        return True
+    return False
+
+def smart_sleep(response):
+    """Dynamic rate limiting based on Shopify headers"""
+    try:
+        call_limit = response.headers.get('X-Shopify-Shop-Api-Call-Limit', '0/40')
+        used, total = map(int, call_limit.split('/'))
+        
+        if used >= 35:
+            time.sleep(2.0)
+        elif used >= 30:
+            time.sleep(1.0)
+        else:
+            time.sleep(0.1)
+    except:
+        time.sleep(0.5)
+
+def get_primary_location():
+    """Fetch primary Shopify location once (cached globally)"""
+    global LOCATION_ID
+    if LOCATION_ID:
+        return LOCATION_ID
+        
+    print("\nFetching primary Shopify location...")
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
+    url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/locations.json"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        LOCATION_ID = response.json()['locations'][0]['id']
+        print(f"  ✓ Using location ID: {LOCATION_ID}")
+        return LOCATION_ID
+    except Exception as e:
+        print(f"  ❌ Error fetching location: {e}")
+        sys.exit(1)
 
 def get_all_shopify_products():
     """Fetch ALL products from Shopify with pagination"""
@@ -30,57 +81,41 @@ def get_all_shopify_products():
     url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
     page_count = 0
-    max_pages = 100  # Safety limit
-    seen_urls = set()
     
-    while url and page_count < max_pages:
-        # Detect infinite loops
-        if url in seen_urls:
-            print(f"\n⚠️  Detected pagination loop, stopping at page {page_count}")
-            break
-        seen_urls.add(url)
+    while url:
+        if check_time_limit(): break
         
         try:
             response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             data = response.json()
             
-            batch_products = data.get('products', [])
-            if not batch_products:
-                # No more products
-                break
+            batch = data.get('products', [])
+            if not batch: break
             
             page_count += 1
-            for product in batch_products:
-                # Index by SKU from first variant
+            for product in batch:
                 if product.get('variants'):
                     sku = product['variants'][0].get('sku', '').strip()
                     if sku:
                         products[sku] = product
             
-            print(f"  Page {page_count}: {len(products)} total products ({len(batch_products)} this page)...", end='\r')
+            print(f"  Page {page_count}: Loaded {len(products)} products...", end='\r')
             
-            # Check for next page using Shopify's Link header
             link_header = response.headers.get('Link', '')
-            url = None  # Reset
-            
+            url = None
             if link_header:
-                # Parse Link header for rel="next"
                 links = link_header.split(',')
                 for link in links:
                     if 'rel="next"' in link:
                         url = link.split(';')[0].strip().strip('<>')
                         break
             
-            if url:
-                time.sleep(0.5)  # Rate limit protection
+            smart_sleep(response)
                 
         except Exception as e:
             print(f"\n❌ Error fetching products: {e}")
             break
-    
-    if page_count >= max_pages:
-        print(f"\n⚠️  Reached maximum page limit ({max_pages})")
     
     print(f"\n  ✓ Loaded {len(products)} unique products from Shopify")
     return products
@@ -89,250 +124,319 @@ def download_johnnyvac_csv():
     """Download and parse JohnnyVac product CSV"""
     print("\nDownloading product CSV from JohnnyVac...")
     try:
-        response = requests.get(JOHNNYVAC_CSV_URL, timeout=30)
+        response = requests.get(JOHNNYVAC_CSV_URL, timeout=60)
         response.raise_for_status()
-        print("  ✓ Downloaded")
         
-        lines = response.text.strip().split('\n')
+        content = response.content.decode('utf-8-sig', errors='replace')
+        lines = content.strip().splitlines()
+        
         reader = csv.DictReader(lines, delimiter=';')
         products = list(reader)
-        
+        print(f"  ✓ Downloaded {len(products)} rows")
         return products
     except Exception as e:
-        print(f"  ❌ Error: {e}")
+        print(f"  ❌ Error downloading CSV: {e}")
         return None
 
+def group_products_by_category(csv_products):
+    """Group products by their ProductCategory"""
+    categories = defaultdict(list)
+    
+    for product in csv_products:
+        category = product.get('ProductCategory', '').strip() or 'Uncategorized'
+        categories[category].append(product)
+    
+    # Sort categories by product count (largest first)
+    sorted_categories = sorted(categories.items(), key=lambda x: len(x[1]), reverse=True)
+    
+    print("\n📊 Product Distribution by Category:")
+    print("=" * 60)
+    for category, products in sorted_categories:
+        print(f"  {category}: {len(products)} products")
+    print("=" * 60)
+    
+    return dict(sorted_categories)
+
+def get_category_to_sync(categories):
+    """Determine which category to sync based on CATEGORY_MODE"""
+    
+    if CATEGORY_MODE == 'all':
+        print("\n🔄 Mode: Syncing ALL categories")
+        return list(categories.keys())
+    
+    if CATEGORY_MODE != 'rotate' and CATEGORY_MODE != 'alternate':
+        # Specific category requested
+        if CATEGORY_MODE in categories:
+            print(f"\n🎯 Mode: Syncing specific category '{CATEGORY_MODE}'")
+            return [CATEGORY_MODE]
+        else:
+            print(f"\n⚠️  Category '{CATEGORY_MODE}' not found. Available categories:")
+            for cat in categories.keys():
+                print(f"    - {cat}")
+            sys.exit(1)
+    
+    category_list = list(categories.keys())
+    
+    # Alternate mode - Split into Group A and Group B
+    if CATEGORY_MODE == 'alternate':
+        # Split categories in half
+        mid_point = (len(category_list) + 1) // 2
+        group_a = category_list[:mid_point]
+        group_b = category_list[mid_point:]
+        
+        # Determine which group based on day of week
+        day_of_week = datetime.now().weekday()  # 0=Monday, 6=Sunday
+        
+        if day_of_week in [0, 2, 4]:  # Monday, Wednesday, Friday
+            selected_group = group_a
+            group_name = "A"
+            next_day = "Tuesday"
+        else:  # Tuesday, Thursday, Saturday, Sunday
+            selected_group = group_b
+            group_name = "B"
+            next_day = "Monday"
+        
+        print(f"\n🔄 Mode: Alternating schedule")
+        print(f"  📅 Today: {datetime.now().strftime('%A')} - Running Group {group_name}")
+        print(f"  📦 Group {group_name} categories: {', '.join(selected_group)}")
+        print(f"  ⏭️  Next sync: Group {'B' if group_name == 'A' else 'A'} on {next_day}")
+        
+        return selected_group
+    
+    # Rotate mode - cycle through categories one at a time
+    if SYNC_MODE == 'weekly':
+        # Cycle every 7 days (Week number determines category)
+        week_num = datetime.now().isocalendar()[1]
+        index = week_num % len(category_list)
+    else:
+        # Daily rotation (Day of year determines category)
+        day_of_year = datetime.now().timetuple().tm_yday
+        index = day_of_year % len(category_list)
+    
+    selected_category = category_list[index]
+    print(f"\n🔄 Mode: Daily rotation")
+    print(f"  📅 Today's category: '{selected_category}' ({index+1}/{len(category_list)})")
+    print(f"  ⏭️  Next category: '{category_list[(index+1) % len(category_list)]}'")
+    
+    return [selected_category]
+
 def needs_update(shopify_product, csv_product):
-    """Check if a Shopify product needs updating based on CSV data"""
+    """Check if update is needed. Returns list of changed fields."""
+    changes = []
+    
     title_field = 'ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR'
     desc_field = 'ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR'
     
     csv_title = csv_product.get(title_field, '').strip()
     csv_desc = csv_product.get(desc_field, '').strip()
-    csv_price = csv_product.get('RegularPrice', '0').strip()
+    
+    if csv_title and shopify_product.get('title') != csv_title:
+        changes.append('title')
+        
+    if csv_desc and shopify_product.get('body_html') != csv_desc:
+        changes.append('description')
+
+    variant = shopify_product['variants'][0]
+    csv_price = csv_product.get('RegularPrice', '0').strip().replace(',', '.')
     csv_inventory = csv_product.get('Inventory', '0').strip()
     
-    # Get Shopify values
-    shopify_title = shopify_product.get('title', '').strip()
-    shopify_desc = shopify_product.get('body_html', '').strip()
+    shopify_price = variant.get('price', '0')
+    shopify_inventory = str(variant.get('inventory_quantity', 0))
     
-    variant = shopify_product.get('variants', [{}])[0]
-    shopify_price = str(variant.get('price', '0')).strip()
-    shopify_inventory = str(variant.get('inventory_quantity', '0')).strip()
-    
-    # Check if any field differs
-    changes = []
-    if csv_title and shopify_title != csv_title:
-        changes.append('title')
-    if csv_desc and shopify_desc != csv_desc:
-        changes.append('description')
-    if csv_price != shopify_price:
+    if float(csv_price) != float(shopify_price):
         changes.append('price')
-    if csv_inventory != shopify_inventory:
+        
+    if int(csv_inventory) != int(shopify_inventory):
         changes.append('inventory')
-    
+        
     return changes
 
-def create_or_update_product(csv_product, shopify_product=None, retries=3):
-    """Create new product or update existing one"""
+def create_or_update_product(csv_product, shopify_product=None, location_id=None, retries=3):
+    """Create or Update product in Shopify with retry logic"""
     sku = csv_product.get('SKU', '').strip()
     title_field = 'ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR'
     desc_field = 'ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR'
     
     title = csv_product.get(title_field, '').strip() or f"Product {sku}"
     description = csv_product.get(desc_field, '').strip()
-    price = csv_product.get('RegularPrice', '0').strip()
-    inventory = csv_product.get('Inventory', '0').strip()
-    weight = csv_product.get('weight', '0').strip()
-    
-    # Image URL
-    image_url = f"{IMAGE_BASE_URL}{sku}.jpg"
-    
-    # Prepare product data
-    product_data = {
-        "product": {
-            "title": title,
-            "body_html": description,
-            "vendor": "JohnnyVac",
-            "product_type": csv_product.get('ProductCategory', '').strip(),
-            "variants": [{
-                "sku": sku,
-                "price": price,
-                "inventory_management": "shopify",
-                "inventory_quantity": int(inventory) if inventory.isdigit() else 0,
-                "weight": float(weight) if weight else 0,
-                "weight_unit": "kg"
-            }],
-            "images": [{"src": image_url}]
-        }
-    }
+    price = csv_product.get('RegularPrice', '0').strip().replace(',', '.')
+    inventory = int(csv_product.get('Inventory', '0').strip())
+    weight = csv_product.get('weight', '0').strip().replace(',', '.')
+    category = csv_product.get('ProductCategory', '').strip()
     
     headers = {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
-    
-    for attempt in range(retries):
-        try:
-            if shopify_product:
-                # Update existing product
-                product_id = shopify_product['id']
-                variant_id = shopify_product['variants'][0]['id']
-                inventory_item_id = shopify_product['variants'][0]['inventory_item_id']
-                
-                # Update product details
+
+    # -- UPDATE FLOW --
+    if shopify_product:
+        product_id = shopify_product['id']
+        variant = shopify_product['variants'][0]
+        variant_id = variant['id']
+        inventory_item_id = variant.get('inventory_item_id')
+        
+        update_data = {
+            "product": {
+                "id": product_id,
+                "title": title,
+                "body_html": description,
+                "product_type": category,
+                "variants": [{
+                    "id": variant_id,
+                    "price": price,
+                    "weight": weight
+                }]
+            }
+        }
+
+        for attempt in range(retries):
+            try:
                 url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products/{product_id}.json"
-                product_data['product']['variants'][0]['id'] = variant_id
-                response = requests.put(url, headers=headers, json=product_data, timeout=30)
+                response = requests.put(url, headers=headers, json=update_data, timeout=30)
                 response.raise_for_status()
-                
-                # Update inventory level separately
-                inv_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/inventory_levels/set.json"
-                inv_data = {
-                    "location_id": shopify_product['variants'][0].get('inventory_item', {}).get('locations', [{}])[0].get('id'),
-                    "inventory_item_id": inventory_item_id,
-                    "available": int(inventory) if inventory.isdigit() else 0
-                }
-                
-                # Get location first
-                loc_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/locations.json"
-                loc_response = requests.get(loc_url, headers=headers, timeout=30)
-                if loc_response.status_code == 200:
-                    locations = loc_response.json().get('locations', [])
-                    if locations:
-                        inv_data['location_id'] = locations[0]['id']
-                        requests.post(inv_url, headers=headers, json=inv_data, timeout=30)
-                
+                smart_sleep(response)
+
+                if inventory_item_id and location_id:
+                    inv_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/inventory_levels/set.json"
+                    inv_payload = {
+                        "location_id": location_id,
+                        "inventory_item_id": inventory_item_id,
+                        "available": inventory
+                    }
+                    inv_response = requests.post(inv_url, headers=headers, json=inv_payload, timeout=30)
+                    inv_response.raise_for_status()
+                    smart_sleep(inv_response)
+                    
                 return 'updated'
-            else:
-                # Create new product
+
+            except requests.exceptions.RequestException as e:
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    print(f"    ❌ Update failed: {e}")
+                    return None
+
+    # -- CREATE FLOW --
+    else:
+        image_url = f"{IMAGE_BASE_URL}{sku}.jpg"
+        product_data = {
+            "product": {
+                "title": title,
+                "body_html": description,
+                "vendor": "JohnnyVac",
+                "product_type": category,
+                "variants": [{
+                    "sku": sku,
+                    "price": price,
+                    "inventory_management": "shopify",
+                    "inventory_quantity": inventory,
+                    "weight": weight,
+                    "weight_unit": "kg"
+                }],
+                "images": [{"src": image_url}]
+            }
+        }
+        
+        for attempt in range(retries):
+            try:
                 url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json"
                 response = requests.post(url, headers=headers, json=product_data, timeout=30)
                 response.raise_for_status()
+                smart_sleep(response)
                 return 'created'
-                
-        except requests.exceptions.RequestException as e:
-            if attempt < retries - 1:
-                wait_time = (attempt + 1) * 5
-                print(f"\n  ⚠️  Retry {attempt + 1}/{retries} in {wait_time}s... ({str(e)[:50]})")
-                time.sleep(wait_time)
-            else:
-                raise
-    
-    return None
+            except requests.exceptions.RequestException as e:
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    print(f"    ❌ Create failed: {e}")
+                    return None
 
 def sync_products():
-    """Main sync function - always compares CSV to actual Shopify inventory"""
-    print("=" * 70)
-    print("JohnnyVac → Shopify Sync (Source of Truth: CSV)")
+    print("=" * 60)
+    print("JohnnyVac → Shopify Sync (Category Batching Mode)")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 70)
-    
-    # Download CSV
+    print("=" * 60)
+
+    # 1. Load Data
     csv_products = download_johnnyvac_csv()
-    if not csv_products:
-        print("\n❌ Failed to download CSV. Exiting.")
-        return
+    if not csv_products: return
     
-    print(f"  ✓ CSV contains {len(csv_products)} products")
+    # 2. Group by categories
+    categories = group_products_by_category(csv_products)
     
-    # Get actual Shopify inventory
+    # 3. Determine which category/categories to sync
+    categories_to_sync = get_category_to_sync(categories)
+    
+    # 4. Filter products to only selected categories
+    filtered_products = []
+    for category_name in categories_to_sync:
+        filtered_products.extend(categories[category_name])
+    
+    print(f"\n📦 Processing {len(filtered_products)} products from {len(categories_to_sync)} category(ies)")
+    
+    # 5. Fetch Shopify products and location
     shopify_products = get_all_shopify_products()
+    location_id = get_primary_location()
     
-    # Compare and identify what needs syncing
-    print("\nAnalyzing differences...")
+    # 6. Compare
+    print("\nCalculating differences...")
     to_create = []
     to_update = []
     
-    for csv_product in csv_products:
-        sku = csv_product.get('SKU', '').strip()
-        if not sku:
-            continue
+    for csv_p in filtered_products:
+        sku = csv_p.get('SKU', '').strip()
+        if not sku: continue
         
         if sku in shopify_products:
-            # Check if update needed
-            changes = needs_update(shopify_products[sku], csv_product)
+            changes = needs_update(shopify_products[sku], csv_p)
             if changes:
-                to_update.append((csv_product, shopify_products[sku], changes))
+                to_update.append((csv_p, shopify_products[sku], changes))
         else:
-            # Product doesn't exist in Shopify
-            to_create.append(csv_product)
-    
-    print(f"\n  ✓ Products to CREATE: {len(to_create)}")
-    print(f"  ✓ Products to UPDATE: {len(to_update)}")
-    print(f"  ✓ Products already in sync: {len(csv_products) - len(to_create) - len(to_update)}")
-    
-    if not to_create and not to_update:
-        print("\n✅ All products are in sync! Nothing to do.")
-        return
-    
-    # Process creates and updates
-    total_changes = len(to_create) + len(to_update)
-    processed = 0
+            to_create.append(csv_p)
+            
+    print(f"  ✓ Create: {len(to_create)}")
+    print(f"  ✓ Update: {len(to_update)}")
+    print(f"  ✓ Already synced: {len(filtered_products) - len(to_create) - len(to_update)}")
+
+    # 7. Process Creates
     created = 0
+    if to_create:
+        print(f"\n--- Creating {len(to_create)} new products ---")
+        for p in to_create:
+            if check_time_limit(): 
+                print(f"\n⏰ Stopped at {created}/{len(to_create)} creates")
+                break
+            
+            sku = p.get('SKU')
+            res = create_or_update_product(p, location_id=location_id)
+            if res:
+                created += 1
+                if created % 10 == 0:
+                    print(f"  Progress: {created}/{len(to_create)} created")
+            
+    # 8. Process Updates
     updated = 0
-    errors = 0
-    
-    print(f"\n{'=' * 70}")
-    print(f"Processing {total_changes} changes in batches of {BATCH_SIZE}")
-    print(f"{'=' * 70}\n")
-    
-    # Process creates
-    for i in range(0, len(to_create), BATCH_SIZE):
-        batch = to_create[i:i + BATCH_SIZE]
-        batch_num = (i // BATCH_SIZE) + 1
-        print(f"Batch {batch_num} - Creating {len(batch)} new products...")
-        
-        for product in batch:
-            sku = product.get('SKU', '').strip()
-            try:
-                result = create_or_update_product(product)
-                if result == 'created':
-                    created += 1
-                    processed += 1
-                    print(f"  ✓ Created: {sku} ({processed}/{total_changes})")
-                time.sleep(RATE_LIMIT_DELAY)
-            except Exception as e:
-                errors += 1
-                print(f"  ❌ Error creating {sku}: {str(e)[:60]}")
-        
-        if i + BATCH_SIZE < len(to_create):
-            print(f"  Waiting {BATCH_DELAY}s before next batch...")
-            time.sleep(BATCH_DELAY)
-    
-    # Process updates
-    for i in range(0, len(to_update), BATCH_SIZE):
-        batch = to_update[i:i + BATCH_SIZE]
-        batch_num = (i // BATCH_SIZE) + 1 + (len(to_create) // BATCH_SIZE)
-        print(f"\nBatch {batch_num} - Updating {len(batch)} products...")
-        
-        for csv_product, shopify_product, changes in batch:
-            sku = csv_product.get('SKU', '').strip()
-            try:
-                result = create_or_update_product(csv_product, shopify_product)
-                if result == 'updated':
-                    updated += 1
-                    processed += 1
-                    print(f"  ✓ Updated: {sku} ({', '.join(changes)}) ({processed}/{total_changes})")
-                time.sleep(RATE_LIMIT_DELAY)
-            except Exception as e:
-                errors += 1
-                print(f"  ❌ Error updating {sku}: {str(e)[:60]}")
-        
-        if i + BATCH_SIZE < len(to_update):
-            print(f"  Waiting {BATCH_DELAY}s before next batch...")
-            time.sleep(BATCH_DELAY)
-    
-    # Final summary
-    print(f"\n{'=' * 70}")
-    print("SYNC COMPLETE")
-    print(f"{'=' * 70}")
-    print(f"✓ Created: {created}")
-    print(f"✓ Updated: {updated}")
-    print(f"❌ Errors: {errors}")
-    print(f"Total processed: {processed}/{total_changes}")
-    print(f"Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'=' * 70}\n")
+    if to_update:
+        print(f"\n--- Updating {len(to_update)} existing products ---")
+        for csv_p, shop_p, changes in to_update:
+            if check_time_limit():
+                print(f"\n⏰ Stopped at {updated}/{len(to_update)} updates")
+                break
+            
+            sku = csv_p.get('SKU')
+            res = create_or_update_product(csv_p, shop_p, location_id)
+            if res:
+                updated += 1
+                if updated % 10 == 0:
+                    print(f"  Progress: {updated}/{len(to_update)} updated")
+
+    print(f"\n{'='*60}")
+    print("SYNC COMPLETED")
+    print(f"Category: {', '.join(categories_to_sync)}")
+    print(f"Created: {created}, Updated: {updated}")
+    print(f"Runtime: {(time.time() - START_TIME)/3600:.2f} hours")
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
     sync_products()
