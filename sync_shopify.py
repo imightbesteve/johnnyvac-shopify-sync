@@ -1,16 +1,14 @@
 """
-JohnnyVac to Shopify Sync Script - Category Batching Mode
-- Processes one category per run to avoid timeouts
-- Automatically cycles through categories daily
+JohnnyVac to Shopify Sync - Daily Full Mode
+- Checks ALL products every run
+- Only sends updates to Shopify if data has changed (Smart Sync)
 """
 import requests
 import csv
 import time
-import json
 import os
 import sys
 from datetime import datetime
-from collections import defaultdict
 
 # Configuration
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', 'kingsway-janitorial.myshopify.com')
@@ -19,15 +17,9 @@ JOHNNYVAC_CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebPr
 IMAGE_BASE_URL = "https://www.johnnyvacstock.com/photos/web/"
 
 # Settings
-BATCH_SIZE = 50
 LANGUAGE = 'en'
-MAX_RUNTIME_SECONDS = 5.5 * 3600 # 5.5 Hours
+MAX_RUNTIME_SECONDS = 5.5 * 3600 # 5.5 Hours safe limit
 START_TIME = time.time()
-
-# Category Batching Configuration
-CATEGORY_MODE = os.environ.get('CATEGORY_MODE', 'alternate')
-SYNC_MODE = os.environ.get('SYNC_MODE', 'daily')
-
 LOCATION_ID = None
 
 def check_time_limit():
@@ -53,12 +45,11 @@ def smart_sleep(response):
         time.sleep(0.5)
 
 def get_primary_location():
-    """Fetch primary Shopify location once"""
+    """Fetch primary Shopify location ID"""
     global LOCATION_ID
-    if LOCATION_ID:
-        return LOCATION_ID
+    if LOCATION_ID: return LOCATION_ID
         
-    print("\nFetching primary Shopify location...")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fetching primary Shopify location...")
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
     url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/locations.json"
     
@@ -70,11 +61,12 @@ def get_primary_location():
         return LOCATION_ID
     except Exception as e:
         print(f"  ❌ Error fetching location: {e}")
+        # We cannot update inventory without a location, so we must exit
         sys.exit(1)
 
 def get_all_shopify_products():
     """Fetch ALL products from Shopify with pagination"""
-    print("\nFetching all products from Shopify...")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fetching all products from Shopify...")
     products = {}
     url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products.json?limit=250"
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
@@ -97,6 +89,8 @@ def get_all_shopify_products():
                         products[sku] = product
             
             print(f"  Page {page_count}: Loaded {len(products)} products...", end='\r')
+            
+            # Pagination
             link_header = response.headers.get('Link', '')
             url = None
             if link_header:
@@ -114,7 +108,7 @@ def get_all_shopify_products():
     return products
 
 def download_johnnyvac_csv():
-    print("\nDownloading product CSV from JohnnyVac...")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Downloading CSV from JohnnyVac...")
     try:
         response = requests.get(JOHNNYVAC_CSV_URL, timeout=60)
         response.raise_for_status()
@@ -128,56 +122,32 @@ def download_johnnyvac_csv():
         print(f"  ❌ Error downloading CSV: {e}")
         return None
 
-def group_products_by_category(csv_products):
-    categories = defaultdict(list)
-    for product in csv_products:
-        category = product.get('ProductCategory', '').strip() or 'Uncategorized'
-        categories[category].append(product)
-    sorted_categories = sorted(categories.items(), key=lambda x: len(x[1]), reverse=True)
-    return dict(sorted_categories)
-
-def get_category_to_sync(categories):
-    if CATEGORY_MODE == 'all':
-        return list(categories.keys())
-    
-    if CATEGORY_MODE not in ['rotate', 'alternate']:
-        if CATEGORY_MODE in categories:
-            return [CATEGORY_MODE]
-        else:
-            print(f"\n⚠️ Category '{CATEGORY_MODE}' not found.")
-            sys.exit(1)
-    
-    category_list = list(categories.keys())
-    
-    if CATEGORY_MODE == 'alternate':
-        mid_point = (len(category_list) + 1) // 2
-        group_a = category_list[:mid_point]
-        group_b = category_list[mid_point:]
-        day_of_week = datetime.now().weekday()
-        
-        if day_of_week in [0, 2, 4]: # Mon, Wed, Fri
-            return group_a
-        else:
-            return group_b
-            
-    # Rotate mode
-    day_of_year = datetime.now().timetuple().tm_yday
-    index = day_of_year % len(category_list)
-    return [category_list[index]]
-
 def needs_update(shopify_product, csv_product):
+    """Compare CSV data vs Shopify data to see if update is required"""
+    # 1. Check Title / Description
     title_field = 'ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR'
     desc_field = 'ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR'
     
     csv_title = csv_product.get(title_field, '').strip()
-    csv_price = float(csv_product.get('RegularPrice', '0').strip().replace(',', '.'))
-    csv_inventory = int(csv_product.get('Inventory', '0').strip())
-    
-    variant = shopify_product['variants'][0]
     if shopify_product.get('title') != csv_title: return True
-    if float(variant.get('price', '0')) != csv_price: return True
-    if int(variant.get('inventory_quantity', 0)) != csv_inventory: return True
+
+    # 2. Check Variant Data (Price, Inventory)
+    variant = shopify_product['variants'][0]
     
+    try:
+        csv_price = float(csv_product.get('RegularPrice', '0').strip().replace(',', '.'))
+        shopify_price = float(variant.get('price', '0'))
+        if csv_price != shopify_price: return True
+    except:
+        pass # If price conversion fails, skip price check
+
+    try:
+        csv_inventory = int(csv_product.get('Inventory', '0').strip())
+        shopify_inventory = int(variant.get('inventory_quantity', 0))
+        if csv_inventory != shopify_inventory: return True
+    except:
+        pass
+
     return False
 
 def create_or_update_product(csv_product, shopify_product=None, location_id=None):
@@ -194,31 +164,58 @@ def create_or_update_product(csv_product, shopify_product=None, location_id=None
     
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
 
+    # --- UPDATE EXISTING PRODUCT ---
     if shopify_product:
         product_id = shopify_product['id']
         variant = shopify_product['variants'][0]
+        
+        # Payload for main product data
         update_data = {
             "product": {
-                "id": product_id, "title": title, "body_html": description,
-                "variants": [{"id": variant['id'], "price": price, "weight": weight}]
+                "id": product_id,
+                "title": title,
+                "body_html": description,
+                "product_type": category,
+                "variants": [{
+                    "id": variant['id'],
+                    "price": price,
+                    "weight": weight
+                }]
             }
         }
+        
         url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/products/{product_id}.json"
         response = requests.put(url, headers=headers, json=update_data, timeout=30)
+        smart_sleep(response)
         
+        # Update Inventory (Requires separate call)
         if response.status_code == 200 and location_id and variant.get('inventory_item_id'):
             inv_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/inventory_levels/set.json"
-            inv_payload = {"location_id": location_id, "inventory_item_id": variant['inventory_item_id'], "available": inventory}
+            inv_payload = {
+                "location_id": location_id,
+                "inventory_item_id": variant['inventory_item_id'],
+                "available": inventory
+            }
             requests.post(inv_url, headers=headers, json=inv_payload, timeout=30)
-        
-        smart_sleep(response)
+            
         return 'updated'
+
+    # --- CREATE NEW PRODUCT ---
     else:
-        # Create Flow
         product_data = {
             "product": {
-                "title": title, "body_html": description, "vendor": "JohnnyVac", "product_type": category,
-                "variants": [{"sku": sku, "price": price, "inventory_management": "shopify", "inventory_quantity": inventory}],
+                "title": title,
+                "body_html": description,
+                "vendor": "JohnnyVac",
+                "product_type": category,
+                "variants": [{
+                    "sku": sku,
+                    "price": price,
+                    "inventory_management": "shopify",
+                    "inventory_quantity": inventory,
+                    "weight": weight,
+                    "weight_unit": "kg"
+                }],
                 "images": [{"src": f"{IMAGE_BASE_URL}{sku}.jpg"}]
             }
         }
@@ -228,29 +225,70 @@ def create_or_update_product(csv_product, shopify_product=None, location_id=None
         return 'created'
 
 def sync_products():
+    print("=" * 60)
+    print("JohnnyVac → Shopify Sync (FULL DAILY MODE)")
+    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
+
+    # 1. Fetch Location ID FIRST (Fail fast if permissions wrong)
+    loc_id = get_primary_location()
+    
+    # 2. Download Source Data
     csv_products = download_johnnyvac_csv()
     if not csv_products: return
     
-    categories = group_products_by_category(csv_products)
-    categories_to_sync = get_category_to_sync(categories)
-    
-    filtered_products = []
-    for cat in categories_to_sync:
-        filtered_products.extend(categories[cat])
-        
+    # 3. Fetch Destination Data
     shopify_products = get_all_shopify_products()
-    loc_id = get_primary_location()
     
-    for p in filtered_products:
-        if check_time_limit(): break
+    # 4. Compare and Build Lists
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Comparing {len(csv_products)} source products vs {len(shopify_products)} existing...")
+    
+    to_create = []
+    to_update = []
+    
+    for p in csv_products:
         sku = p.get('SKU', '').strip()
         if not sku: continue
         
         if sku in shopify_products:
+            # If product exists, check if it needs an update
             if needs_update(shopify_products[sku], p):
-                create_or_update_product(p, shopify_products[sku], loc_id)
+                to_update.append((p, shopify_products[sku]))
         else:
-            create_or_update_product(p, None, loc_id)
+            # If product doesn't exist, create it
+            to_create.append(p)
+
+    print(f"  ✓ Products to Create: {len(to_create)}")
+    print(f"  ✓ Products to Update: {len(to_update)}")
+    print(f"  ✓ Unchanged (Skipping): {len(csv_products) - len(to_create) - len(to_update)}")
+
+    # 5. Process Creates
+    created_count = 0
+    if to_create:
+        print(f"\n--- Creating {len(to_create)} new products ---")
+        for p in to_create:
+            if check_time_limit(): break
+            res = create_or_update_product(p, None, loc_id)
+            if res:
+                created_count += 1
+                if created_count % 5 == 0: print(f"  Created {created_count}/{len(to_create)}...", end='\r')
+
+    # 6. Process Updates
+    updated_count = 0
+    if to_update:
+        print(f"\n--- Updating {len(to_update)} existing products ---")
+        for p, shop_p in to_update:
+            if check_time_limit(): break
+            res = create_or_update_product(p, shop_p, loc_id)
+            if res:
+                updated_count += 1
+                if updated_count % 10 == 0: print(f"  Updated {updated_count}/{len(to_update)}...", end='\r')
+
+    print(f"\n\n{'='*60}")
+    print("SYNC COMPLETED")
+    print(f"Created: {created_count}")
+    print(f"Updated: {updated_count}")
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
     sync_products()
