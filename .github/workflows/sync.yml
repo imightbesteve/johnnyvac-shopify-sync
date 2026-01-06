@@ -2,30 +2,16 @@ name: Sync JohnnyVac to Shopify
 
 on:
   schedule:
-    # Run 5 times per week on alternating schedule
-    - cron: '0 6 * * 1,2,3,4,5'  # Mon-Fri at 6 AM UTC
+    # Runs every day at 6 AM UTC (1 AM EST)
+    - cron: '0 6 * * *'
   workflow_dispatch:
-    # Manual trigger with options
-    inputs:
-      category_mode:
-        description: 'Category Mode'
-        required: false
-        default: 'alternate'
-        type: choice
-        options:
-          - alternate
-          - rotate
-          - all
-          - specific
-      category_name:
-        description: 'Specific Category Name (if mode=specific)'
-        required: false
-        type: string
+    # Allows you to click "Run workflow" manually at any time
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -43,11 +29,4 @@ jobs:
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-          CATEGORY_MODE: ${{ github.event.inputs.category_mode || 'alternate' }}
-          CATEGORY_NAME: ${{ github.event.inputs.category_name || '' }}
-        run: |
-          # If specific category requested, use category name
-          if [ "$CATEGORY_MODE" = "specific" ] && [ -n "$CATEGORY_NAME" ]; then
-            export CATEGORY_MODE="$CATEGORY_NAME"
-          fi
-          python sync_shopify.py
+        run: python sync_shopify.py
