@@ -1,7 +1,8 @@
 """
-JohnnyVac to Shopify Sync - Daily Full Mode
+JohnnyVac to Shopify Sync - Daily Full Mode + Smart Auto-Tagging
 - Checks ALL products every run
-- Only sends updates to Shopify if data has changed (Smart Sync)
+- Generates Tags based on Keywords (Logic provided by user)
+- Only sends updates to Shopify if data has changed
 """
 import requests
 import csv
@@ -44,6 +45,36 @@ def smart_sleep(response):
     except:
         time.sleep(0.5)
 
+def get_custom_tags(title):
+    """
+    Generates Shopify Tags based on keywords in the Product Title.
+    Translated from User's Excel Formula.
+    """
+    t = title.lower()
+    tags = []
+
+    # Safety
+    if "glove" in t: tags.extend(["safety", "gloves", "protection"])
+    if "vest" in t or "visibility" in t: tags.extend(["safety", "vests", "visibility"])
+    if "mask" in t or "respirator" in t: tags.extend(["safety", "masks", "respiratory"])
+    if "first aid" in t or "first-aid" in t: tags.extend(["safety", "first-aid", "emergency"])
+    if "sign" in t or "warning" in t: tags.extend(["safety", "signs", "warning"])
+
+    # Waste
+    if "trash bag" in t or "garbage bag" in t: tags.extend(["waste", "trash-bags", "disposal"])
+    if "can liner" in t or "liner" in t: tags.extend(["waste", "can-liners", "disposal"])
+    if "receptacle" in t or " bin" in t or "container" in t: tags.extend(["waste", "receptacles", "bins"])
+    if "recycle" in t or "recycling" in t: tags.extend(["waste", "recycling", "eco-friendly"])
+
+    # Food Service
+    if "disposable" in t or "plate" in t or "bowl" in t or "cutlery" in t: tags.extend(["food-service", "disposables", "single-use"])
+    if "food storage" in t or "food container" in t: tags.extend(["food-service", "storage", "containers"])
+    if "kitchen" in t: tags.extend(["food-service", "kitchen", "supplies"])
+
+    # Remove duplicates and format as comma-separated string
+    unique_tags = list(set(tags))
+    return ", ".join(unique_tags)
+
 def get_primary_location():
     """Fetch primary Shopify location ID"""
     global LOCATION_ID
@@ -61,7 +92,6 @@ def get_primary_location():
         return LOCATION_ID
     except Exception as e:
         print(f"  ❌ Error fetching location: {e}")
-        # We cannot update inventory without a location, so we must exit
         sys.exit(1)
 
 def get_all_shopify_products():
@@ -90,7 +120,6 @@ def get_all_shopify_products():
             
             print(f"  Page {page_count}: Loaded {len(products)} products...", end='\r')
             
-            # Pagination
             link_header = response.headers.get('Link', '')
             url = None
             if link_header:
@@ -123,30 +152,39 @@ def download_johnnyvac_csv():
         return None
 
 def needs_update(shopify_product, csv_product):
-    """Compare CSV data vs Shopify data to see if update is required"""
-    # 1. Check Title / Description
+    """Compare CSV data + New Tags vs Shopify data"""
     title_field = 'ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR'
-    desc_field = 'ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR'
     
+    # 1. Check basic fields
     csv_title = csv_product.get(title_field, '').strip()
     if shopify_product.get('title') != csv_title: return True
 
-    # 2. Check Variant Data (Price, Inventory)
-    variant = shopify_product['variants'][0]
+    # 2. Check Tags (New Logic)
+    generated_tags = get_custom_tags(csv_title)
+    current_shopify_tags = shopify_product.get('tags', '')
     
+    # Sort both to ensure accurate comparison (e.g. "a, b" == "b, a")
+    gen_set = set([t.strip() for t in generated_tags.split(',') if t.strip()])
+    curr_set = set([t.strip() for t in current_shopify_tags.split(',') if t.strip()])
+    
+    # Only update if our NEW tags are missing from Shopify
+    # (We use issubset so we don't delete manual tags you added yourself)
+    if not gen_set.issubset(curr_set):
+        return True
+
+    # 3. Check Price/Inventory
+    variant = shopify_product['variants'][0]
     try:
         csv_price = float(csv_product.get('RegularPrice', '0').strip().replace(',', '.'))
         shopify_price = float(variant.get('price', '0'))
         if csv_price != shopify_price: return True
-    except:
-        pass # If price conversion fails, skip price check
+    except: pass
 
     try:
         csv_inventory = int(csv_product.get('Inventory', '0').strip())
         shopify_inventory = int(variant.get('inventory_quantity', 0))
         if csv_inventory != shopify_inventory: return True
-    except:
-        pass
+    except: pass
 
     return False
 
@@ -162,20 +200,27 @@ def create_or_update_product(csv_product, shopify_product=None, location_id=None
     weight = csv_product.get('weight', '0').strip().replace(',', '.')
     category = csv_product.get('ProductCategory', '').strip()
     
+    # Generate Tags
+    tags = get_custom_tags(title)
+    
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
 
-    # --- UPDATE EXISTING PRODUCT ---
+    # --- UPDATE ---
     if shopify_product:
         product_id = shopify_product['id']
         variant = shopify_product['variants'][0]
         
-        # Payload for main product data
+        # Merge existing tags with new tags to avoid deleting manual tags
+        current_tags = shopify_product.get('tags', '')
+        combined_tags = ", ".join(list(set(current_tags.split(',') + tags.split(',')))).strip(', ')
+
         update_data = {
             "product": {
                 "id": product_id,
                 "title": title,
                 "body_html": description,
                 "product_type": category,
+                "tags": combined_tags, # Update Tags
                 "variants": [{
                     "id": variant['id'],
                     "price": price,
@@ -188,7 +233,6 @@ def create_or_update_product(csv_product, shopify_product=None, location_id=None
         response = requests.put(url, headers=headers, json=update_data, timeout=30)
         smart_sleep(response)
         
-        # Update Inventory (Requires separate call)
         if response.status_code == 200 and location_id and variant.get('inventory_item_id'):
             inv_url = f"https://{SHOPIFY_STORE}/admin/api/2024-01/inventory_levels/set.json"
             inv_payload = {
@@ -200,7 +244,7 @@ def create_or_update_product(csv_product, shopify_product=None, location_id=None
             
         return 'updated'
 
-    # --- CREATE NEW PRODUCT ---
+    # --- CREATE ---
     else:
         product_data = {
             "product": {
@@ -208,6 +252,7 @@ def create_or_update_product(csv_product, shopify_product=None, location_id=None
                 "body_html": description,
                 "vendor": "JohnnyVac",
                 "product_type": category,
+                "tags": tags, # Add Tags
                 "variants": [{
                     "sku": sku,
                     "price": price,
@@ -226,22 +271,16 @@ def create_or_update_product(csv_product, shopify_product=None, location_id=None
 
 def sync_products():
     print("=" * 60)
-    print("JohnnyVac → Shopify Sync (FULL DAILY MODE)")
+    print("JohnnyVac → Shopify Sync (FULL DAILY + AUTO-TAGS)")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    # 1. Fetch Location ID FIRST (Fail fast if permissions wrong)
     loc_id = get_primary_location()
-    
-    # 2. Download Source Data
     csv_products = download_johnnyvac_csv()
     if not csv_products: return
-    
-    # 3. Fetch Destination Data
     shopify_products = get_all_shopify_products()
     
-    # 4. Compare and Build Lists
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Comparing {len(csv_products)} source products vs {len(shopify_products)} existing...")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Comparing source vs existing...")
     
     to_create = []
     to_update = []
@@ -251,18 +290,15 @@ def sync_products():
         if not sku: continue
         
         if sku in shopify_products:
-            # If product exists, check if it needs an update
             if needs_update(shopify_products[sku], p):
                 to_update.append((p, shopify_products[sku]))
         else:
-            # If product doesn't exist, create it
             to_create.append(p)
 
     print(f"  ✓ Products to Create: {len(to_create)}")
     print(f"  ✓ Products to Update: {len(to_update)}")
-    print(f"  ✓ Unchanged (Skipping): {len(csv_products) - len(to_create) - len(to_update)}")
+    print(f"  ✓ Unchanged: {len(csv_products) - len(to_create) - len(to_update)}")
 
-    # 5. Process Creates
     created_count = 0
     if to_create:
         print(f"\n--- Creating {len(to_create)} new products ---")
@@ -273,7 +309,6 @@ def sync_products():
                 created_count += 1
                 if created_count % 5 == 0: print(f"  Created {created_count}/{len(to_create)}...", end='\r')
 
-    # 6. Process Updates
     updated_count = 0
     if to_update:
         print(f"\n--- Updating {len(to_update)} existing products ---")
