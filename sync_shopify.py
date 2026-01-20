@@ -8,12 +8,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # --- CONFIGURATION ---
-# Pulls from your environment variables as seen in your logs
 SHOP_URL = os.getenv("SHOPIFY_STORE", "").replace("https://", "").strip()
 API_PASSWORD = os.getenv("SHOPIFY_ACCESS_TOKEN", "").strip()
-LOCATION_ID = "107962957846"  # Your Shopify Location ID
+LOCATION_ID = "107962957846" # Your Shopify Location ID
 CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv"
-API_VERSION = "2025-10" 
+API_VERSION = "2024-01" 
 
 HEADERS = {
     "X-Shopify-Access-Token": API_PASSWORD,
@@ -26,7 +25,7 @@ def get_smart_session():
     session = requests.Session()
     retry_strategy = Retry(
         total=5,
-        backoff_factor=2,  # Exponential backoff (2s, 4s, 8s, 16s...)
+        backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET", "PUT", "POST"]
     )
@@ -39,7 +38,6 @@ session = get_smart_session()
 
 # --- 2. DATA HELPER FUNCTIONS ---
 def normalize_price(price_str):
-    """Converts price strings like '12,50' to float 12.50."""
     if not price_str: return 0.0
     try:
         return float(str(price_str).replace(',', '.').strip())
@@ -47,7 +45,6 @@ def normalize_price(price_str):
         return 0.0
 
 def get_next_link(link_header):
-    """Parses Shopify pagination headers."""
     if not link_header: return None
     match = re.search(r'<([^>]+)>;\s*rel="next"', link_header)
     return match.group(1) if match else None
@@ -55,30 +52,30 @@ def get_next_link(link_header):
 # --- 3. CATEGORIZATION ENGINE ---
 def classify_product(title_en, title_fr, csv_cat):
     """
-    Assigns Product Type and Tags based on your Smart Collection conditions.
-    Matches Equipment, Consumables, Maintenance Parts, and Supplies.
+    Enhanced Categorization Engine including PPE, Food Service, and Dispensers.
+    Assigns Product Type and Tags based on keyword matching.
     """
     t = f"{str(title_en)} {str(title_fr)}".upper()
     cat = str(csv_cat).upper()
     
     # A. Administrative (Smart Collection: Discontinued)
-    if any(k in t for k in ["RARELY ORDERED", "DISCONTINUED", "ADJUSTED PRICE"]):
+    if any(k in t for k in ["RARELY ORDERED", "DISCONTINUED", "ADJUSTED PRICE", "RAREMENT COMMANDE"]):
         return "Discontinued / Special Order", "discontinued"
 
-    # B. Main Equipment (Smart Collections: Commercial Vacuums, Central Vacuums, etc.)
+    # B. Main Equipment
     equipment = {
-        "Commercial Vacuums": ["COMMERCIAL VAC", "BACKPACK", "CANISTER", "UPRIGHT"],
+        "Commercial Vacuums": ["COMMERCIAL VAC", "BACKPACK", "CANISTER", "UPRIGHT", "ASPIRATEUR DORSAL"],
         "Central Vacuums": ["CENTRAL VAC", "ASPIRATEUR CENTRAL"],
-        "Carpet Extractors": ["EXTRACTOR", "CARPET CLEANER"],
-        "Automatic Scrubbers": ["SCRUBBER", "AUTO-SCRUBBER"],
-        "Floor Machines & Burnishers": ["BURNISHER", "POLISHER", "FLOOR MACHINE"],
+        "Carpet Extractors": ["EXTRACTOR", "CARPET CLEANER", "EXTRACTEUR"],
+        "Automatic Scrubbers": ["SCRUBBER", "AUTO-SCRUBBER", "RECURREUSE"],
+        "Floor Machines & Burnishers": ["BURNISHER", "POLISHER", "FLOOR MACHINE", "POLISSEUSE"],
         "Pressure Washers": ["PRESSURE WASHER", "NETTOYEUR HAUTE PRESSION"]
     }
     for p_type, keywords in equipment.items():
         if any(k in t for k in keywords):
             return p_type, "equipment"
 
-    # C. Consumables (Smart Collections: Vacuum Bags, Filters, Belts, Hoses)
+    # C. Consumables
     consumables = {
         "Vacuum Bags": ["BAG", "SAC"],
         "Vacuum Filters": ["FILTER", "FILTRE", "HEPA", "CARTRIDGE"],
@@ -89,9 +86,30 @@ def classify_product(title_en, title_fr, csv_cat):
         if any(k in t for k in keywords):
             return p_type, "consumable"
 
-    # D. Maintenance Parts (Smart Collections: Hardware, Seals, Electrical, Wheels)
+    # D. Facilities & Cleaning Supplies (PPE, Food Service, Dispensers)
+    # Safety & PPE
+    if any(k in t for k in ["GLOVE", "GANT", "MASK", "MASQUE", "VEST", "VESTE", "GLASSES", "LUNETTE", "FIRST AID", "SECURIT"]):
+        return "Safety & PPE", "cleaning-supplies, safety"
+
+    # Food Service
+    if any(k in t for k in ["CUTLERY", "COUTELLERIE", "PLATE", "ASSIETTE", "CUP", "VERRE", "NAPKIN", "SERVIETTE", "TRAY", "PLATEAU", "UTENSIL"]):
+        return "Food Service", "cleaning-supplies, food-service"
+
+    # Dispensers
+    if any(k in t for k in ["DISPENSER", "DISTRIBUTEUR", "TORK", "SANIS", "KIMBERLY"]):
+        return "Dispensers", "cleaning-supplies, dispensers"
+
+    # Paper Products
+    if any(k in t for k in ["PAPER", "TOWEL", "TISSUE", "PAPIER", "ESSUIE-TOUT", "TOILET PAPER"]):
+        return "Paper Products", "cleaning-supplies, paper"
+
+    # Chemicals
+    if any(k in t for k in ["CHEMICAL", "CLEANER", "SOAP", "DETERGENT", "DEGREASER", "SAVON", "NETTOYANT"]):
+        return "Chemicals & Cleaners", "cleaning-supplies, chemicals"
+
+    # E. Maintenance Parts
     # Hardware & Fasteners
-    if any(k in t for k in ["SCREW", "BOLT", "NUT", "WASHER", "RIVET", "VIS", "ECROU"]):
+    if any(k in t for k in ["SCREW", "BOLT", "NUT", "WASHER", "RIVET", "VIS", "ECROU", "RONDELLE"]):
         return "Hardware & Fasteners", "maintenance, parts"
     
     # Seals & Gaskets
@@ -103,18 +121,11 @@ def classify_product(title_en, title_fr, csv_cat):
         return "Electrical Components", "maintenance, parts"
         
     # Wheels & Casters
-    if any(k in t for k in ["WHEEL", "CASTER", "ROULETTE"]):
+    if any(k in t for k in ["WHEEL", "CASTER", "ROULETTE", "ROUE"]):
         return "Wheels & Casters", "maintenance, parts"
 
-    # E. Cleaning Supplies (Smart Collections: Chemicals, Paper Products)
-    if any(k in t for k in ["CHEMICAL", "CLEANER", "SOAP", "DETERGENT", "DEGREASER"]):
-        return "Chemicals & Cleaners", "cleaning-supplies"
-    
-    if any(k in t for k in ["PAPER", "TOWEL", "TISSUE", "PAPIER"]):
-        return "Paper Products", "cleaning-supplies"
-
     # F. Fallback (Smart Collection: Needs Review)
-    if cat in ["ALL PARTS", "MISCELLANEOUS", "", "PARTS"] or not title_en:
+    if cat in ["JOHNNY VAC PARTS (*)", "ALL PARTS", "MISCELLANEOUS", "", "PARTS"] or not title_en:
         return "General Maintenance", "needs-review"
     
     return csv_cat if csv_cat else "General Maintenance", "imported"
@@ -132,7 +143,6 @@ def sync_johnnyvac():
     r.encoding = 'utf-8-sig'
     csv_reader = csv.DictReader(io.StringIO(r.text), delimiter=';')
     
-    # Exact Mapping from JVWebProducts structure
     jv_products = {}
     for row in csv_reader:
         sku = row.get('SKU')
@@ -150,7 +160,7 @@ def sync_johnnyvac():
     print(f"✓ Parsed {len(jv_products)} products from JohnnyVac.")
     if not jv_products: return
 
-    print(f"Step 2: Fetching Shopify Products from {SHOP_URL}...")
+    print(f"Step 2: Fetching Shopify Products...")
     shopify_products = {}
     url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/products.json?limit=250"
     
@@ -176,17 +186,14 @@ def sync_johnnyvac():
                     'image_count': len(p.get('images', []))
                 }
         url = get_next_link(resp.headers.get('Link'))
-        if url: print(".", end="", flush=True)
 
-    print(f"\n✓ Loaded {len(shopify_products)} matching products from Shopify.")
+    print(f"✓ Loaded {len(shopify_products)} products from Shopify.")
     print("Step 3: Processing Sync...")
 
     update_count = 0
     for sku, jv_item in jv_products.items():
         if sku in shopify_products:
             sh_data = shopify_products[sku]
-            
-            # --- PREPARE TARGET DATA ---
             new_type, new_tags = classify_product(jv_item['title_en'], jv_item['title_fr'], jv_item['category'])
             jv_price = normalize_price(jv_item['price'])
             sh_price = float(sh_data['price'])
@@ -194,46 +201,26 @@ def sync_johnnyvac():
             qty_clean = jv_item['inventory'].replace(',', '.').strip()
             jv_qty = int(float(qty_clean)) if qty_clean else 0
             
-            # Image check: Only upload if product has 0 images and CSV has an URL
-            csv_img_url = jv_item['imageurl'].strip()
-            needs_image = (sh_data['image_count'] == 0) and (csv_img_url != "") and (csv_img_url.startswith('http'))
-
-            # --- DETECT CHANGES ---
             type_changed = sh_data['product_type'] != new_type
             tags_changed = sh_data['tags'] != new_tags
             price_changed = abs(jv_price - sh_price) > 0.01
             qty_changed = sh_data['inventory_quantity'] != jv_qty
 
-            if type_changed or tags_changed or price_changed or qty_changed or needs_image:
+            if type_changed or tags_changed or price_changed or qty_changed:
                 update_count += 1
-                if update_count % 20 == 0: print(f"Update #{update_count}: Syncing {sku}")
-
-                # 1. Update Inventory Level
+                
+                # Update Inventory
                 if qty_changed:
-                    inv_payload = {
-                        "location_id": LOCATION_ID,
-                        "inventory_item_id": sh_data['inventory_item_id'],
-                        "available": jv_qty
-                    }
+                    inv_payload = {"location_id": LOCATION_ID, "inventory_item_id": sh_data['inventory_item_id'], "available": jv_qty}
                     session.post(f"https://{SHOP_URL}/admin/api/{API_VERSION}/inventory_levels/set.json", json=inv_payload)
-                    time.sleep(0.4)
 
-                # 2. Update Product Metadata (Type, Tags, Price)
+                # Update Meta
                 if type_changed or tags_changed or price_changed:
                     prod_payload = {"id": sh_data['product_id']}
                     if type_changed: prod_payload["product_type"] = new_type
                     if tags_changed: prod_payload["tags"] = new_tags
-                    if price_changed:
-                        prod_payload["variants"] = [{"id": sh_data['variant_id'], "price": str(jv_price)}]
-                    
+                    if price_changed: prod_payload["variants"] = [{"id": sh_data['variant_id'], "price": str(jv_price)}]
                     session.put(f"https://{SHOP_URL}/admin/api/{API_VERSION}/products/{sh_data['product_id']}.json", json={"product": prod_payload})
-                    time.sleep(0.5)
-
-                # 3. Handle Missing Images
-                if needs_image:
-                    img_payload = {"image": {"src": csv_img_url}}
-                    session.post(f"https://{SHOP_URL}/admin/api/{API_VERSION}/products/{sh_data['product_id']}/images.json", json=img_payload)
-                    time.sleep(1.0)
 
     print(f"\nSync Complete. Total Updates: {update_count}")
 
