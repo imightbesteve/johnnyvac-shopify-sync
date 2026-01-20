@@ -7,13 +7,13 @@ import os
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# --- CONFIGURATION (UPDATED TO USE ENV VARIABLES) ---
-# We use os.getenv to pull the secrets shown in your logs
+# --- CONFIGURATION ---
+# Pulls credentials from your environment variables
 SHOP_URL = os.getenv("SHOPIFY_STORE", "").replace("https://", "").strip()
 API_PASSWORD = os.getenv("SHOPIFY_ACCESS_TOKEN", "").strip()
 LOCATION_ID = "107962957846"
 CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv"
-API_VERSION = "2024-01" 
+API_VERSION = "2025-10" 
 
 HEADERS = {
     "X-Shopify-Access-Token": API_PASSWORD,
@@ -40,6 +40,7 @@ session = get_smart_session()
 def normalize_price(price_str):
     if not price_str: return 0.0
     try:
+        # Handle "12,50" -> 12.50
         return float(str(price_str).replace(',', '.').strip())
     except ValueError:
         return 0.0
@@ -50,8 +51,9 @@ def get_next_link(link_header):
     return match.group(1) if match else None
 
 # --- 3. CATEGORIZATION ENGINE ---
-def classify_product(title, csv_cat):
-    t = str(title).upper()
+def classify_product(title_en, title_fr, csv_cat):
+    # Combine EN/FR titles for richer keyword matching
+    t = f"{str(title_en)} {str(title_fr)}".upper()
     
     # Administrative
     if any(k in t for k in ["RARELY ORDERED", "DISCONTINUED", "ADJUSTED PRICE"]):
@@ -111,58 +113,58 @@ def sync_johnnyvac():
         print(f"CRITICAL: Could not download CSV. {e}")
         return
 
-    # Decode and fix BOM
     r.encoding = 'utf-8-sig'
-    
-    # DEBUG: Print first few chars to verify content
-    print(f"DEBUG: CSV content sample: {r.text[:100]}")
-
     csv_reader = csv.DictReader(io.StringIO(r.text), delimiter=';')
     
-    # HEADER NORMALIZATION: Find the SKU column regardless of case
+    # --- EXACT COLUMN MAPPING BASED ON YOUR IMAGE ---
+    # We use lowercase mapping to be safe, but target the keys you provided
     headers = csv_reader.fieldnames
     if not headers:
         print("CRITICAL: CSV has no headers!")
         return
-        
-    print(f"DEBUG: CSV Headers Found: {headers}")
-    
-    # Identify the correct keys dynamically
-    sku_key = next((h for h in headers if h.lower() == 'sku'), None)
-    title_key = next((h for h in headers if h.lower() == 'title' or h.lower() == 'description_en'), 'title')
-    price_key = next((h for h in headers if h.lower() == 'price'), 'price')
-    qty_key = next((h for h in headers if h.lower() == 'inventory' or h.lower() == 'qty'), 'inventory')
-    cat_key = next((h for h in headers if h.lower() == 'category'), 'category')
-    img_key = next((h for h in headers if h.lower() == 'imageurl' or h.lower() == 'image'), 'imageurl')
 
-    if not sku_key:
-        print("CRITICAL: Could not find 'sku' column in CSV.")
+    # Helper to find column ignoring case
+    def find_col(candidates):
+        for h in headers:
+            if h in candidates:
+                return h
+        return None
+
+    sku_key = find_col(['SKU', 'sku'])
+    title_en_key = find_col(['ProductTitleEN', 'producttitleen'])
+    title_fr_key = find_col(['ProductTitleFR', 'producttitlefr'])
+    price_key = find_col(['RegularPrice', 'regularprice'])
+    qty_key = find_col(['Inventory', 'inventory'])
+    cat_key = find_col(['ProductCategory', 'productcategory'])
+    img_key = find_col(['ImageUrl', 'imageurl'])
+
+    if not sku_key or not title_en_key:
+        print(f"CRITICAL: Missing required columns.\nFound: {headers}")
         return
+
+    print(f"✓ Columns mapped: SKU='{sku_key}', Title='{title_en_key}', Price='{price_key}'")
 
     jv_products = {}
     for row in csv_reader:
         if row.get(sku_key):
             jv_products[row[sku_key]] = {
                 'sku': row[sku_key],
-                'title': row.get(title_key, ''),
+                'title_en': row.get(title_en_key, ''),
+                'title_fr': row.get(title_fr_key, ''),
                 'price': row.get(price_key, '0'),
                 'inventory': row.get(qty_key, '0'),
                 'category': row.get(cat_key, ''),
                 'imageurl': row.get(img_key, '')
             }
-            
-    print(f"✓ Parsed {len(jv_products)} products from JohnnyVac using key '{sku_key}'.")
+
+    print(f"✓ Parsed {len(jv_products)} products.")
     
-    if len(jv_products) == 0:
-        print("Stopping script because 0 products were loaded.")
-        return
+    # Debug: Check one product to ensure title is reading
+    first_sku = list(jv_products.keys())[0]
+    print(f"DEBUG: Sample Product [{first_sku}] Title: {jv_products[first_sku]['title_en']}")
 
     print(f"Step 2: Fetching Shopify Products from {SHOP_URL}...")
     
-    if not SHOP_URL or not API_PASSWORD:
-        print("CRITICAL: SHOPIFY_STORE or SHOPIFY_ACCESS_TOKEN env vars are missing.")
-        return
-
     shopify_products = {}
     url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/products.json?limit=250"
     
@@ -170,15 +172,13 @@ def sync_johnnyvac():
         try:
             resp = session.get(url)
             if resp.status_code == 401:
-                print("CRITICAL: 401 Unauthorized. Check your API Token.")
+                print("CRITICAL: 401 Unauthorized. Check credentials.")
                 return
             resp.raise_for_status()
             
             data = resp.json()
             for p in data.get('products', []):
-                # Only process if product has variants
                 if not p['variants']: continue
-                
                 variant = p['variants'][0]
                 if variant.get('sku'):
                     shopify_products[variant['sku']] = {
@@ -209,10 +209,15 @@ def sync_johnnyvac():
             sh_data = shopify_products[sku]
             
             # --- PREPARE DATA ---
-            new_type, new_tags = classify_product(jv_item['title'], jv_item['category'])
+            # Use English title for Shopify, but check BOTH EN/FR for categorization keywords
+            new_type, new_tags = classify_product(jv_item['title_en'], jv_item['title_fr'], jv_item['category'])
+            
             jv_price = normalize_price(jv_item['price'])
             sh_price = float(sh_data['price'])
-            jv_qty = int(float(jv_item['inventory'].replace(',', '.'))) if jv_item['inventory'] else 0
+            
+            # Clean inventory string
+            qty_clean = jv_item['inventory'].replace(',', '.').strip()
+            jv_qty = int(float(qty_clean)) if qty_clean else 0
             
             # Image Check
             csv_img_url = jv_item['imageurl'].strip()
@@ -238,7 +243,7 @@ def sync_johnnyvac():
                     session.post(f"https://{SHOP_URL}/admin/api/{API_VERSION}/inventory_levels/set.json", json=inv_payload)
                     time.sleep(0.3)
 
-                # 2. Update Product Metadata
+                # 2. Update Metadata
                 prod_payload = {"id": sh_data['product_id']}
                 if type_changed: prod_payload["product_type"] = new_type
                 if tags_changed: prod_payload["tags"] = new_tags
@@ -254,7 +259,7 @@ def sync_johnnyvac():
                     print(f"  + Uploading image for {sku}")
                     image_payload = {"image": {"src": csv_img_url}}
                     session.post(f"https://{SHOP_URL}/admin/api/{API_VERSION}/products/{sh_data['product_id']}/images.json", json=image_payload)
-                    time.sleep(1.0) # Extra wait for images
+                    time.sleep(1.0) 
 
     print(f"\nSync Complete. {update_count} products updated.")
 
