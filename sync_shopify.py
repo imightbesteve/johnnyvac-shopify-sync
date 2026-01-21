@@ -8,11 +8,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # --- CONFIGURATION ---
+# Pulls credentials from your environment variables
 SHOP_URL = os.getenv("SHOPIFY_STORE", "").replace("https://", "").strip()
 API_PASSWORD = os.getenv("SHOPIFY_ACCESS_TOKEN", "").strip()
-LOCATION_ID = "107962957846" # Your Shopify Location ID
+LOCATION_ID = "107962957846"
 CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv"
-API_VERSION = "2024-01" 
+API_VERSION = "2025-10" 
 
 HEADERS = {
     "X-Shopify-Access-Token": API_PASSWORD,
@@ -21,7 +22,6 @@ HEADERS = {
 
 # --- 1. ROBUST SESSION SETUP ---
 def get_smart_session():
-    """Sets up a session with automatic retries and backoff for Shopify's API."""
     session = requests.Session()
     retry_strategy = Retry(
         total=5,
@@ -40,6 +40,7 @@ session = get_smart_session()
 def normalize_price(price_str):
     if not price_str: return 0.0
     try:
+        # Handle "12,50" -> 12.50
         return float(str(price_str).replace(',', '.').strip())
     except ValueError:
         return 0.0
@@ -51,31 +52,27 @@ def get_next_link(link_header):
 
 # --- 3. CATEGORIZATION ENGINE ---
 def classify_product(title_en, title_fr, csv_cat):
-    """
-    Enhanced Categorization Engine including PPE, Food Service, and Dispensers.
-    Assigns Product Type and Tags based on keyword matching.
-    """
+    # Combine EN/FR titles for richer keyword matching
     t = f"{str(title_en)} {str(title_fr)}".upper()
-    cat = str(csv_cat).upper()
     
-    # A. Administrative (Smart Collection: Discontinued)
-    if any(k in t for k in ["RARELY ORDERED", "DISCONTINUED", "ADJUSTED PRICE", "RAREMENT COMMANDE"]):
-        return "Discontinued / Special Order", "discontinued"
+    # Administrative
+    if any(k in t for k in ["RARELY ORDERED", "DISCONTINUED", "ADJUSTED PRICE"]):
+        return "Discontinued / Special Order", "admin, discontinued"
 
-    # B. Main Equipment
+    # Equipment
     equipment = {
-        "Commercial Vacuums": ["COMMERCIAL VAC", "BACKPACK", "CANISTER", "UPRIGHT", "ASPIRATEUR DORSAL"],
+        "Commercial Vacuums": ["COMMERCIAL VAC", "BACKPACK", "CANISTER", "UPRIGHT"],
         "Central Vacuums": ["CENTRAL VAC", "ASPIRATEUR CENTRAL"],
-        "Carpet Extractors": ["EXTRACTOR", "CARPET CLEANER", "EXTRACTEUR"],
-        "Automatic Scrubbers": ["SCRUBBER", "AUTO-SCRUBBER", "RECURREUSE"],
-        "Floor Machines & Burnishers": ["BURNISHER", "POLISHER", "FLOOR MACHINE", "POLISSEUSE"],
+        "Carpet Extractors": ["EXTRACTOR", "CARPET CLEANER"],
+        "Automatic Scrubbers": ["SCRUBBER", "AUTO-SCRUBBER"],
+        "Floor Machines & Burnishers": ["BURNISHER", "POLISHER", "FLOOR MACHINE"],
         "Pressure Washers": ["PRESSURE WASHER", "NETTOYEUR HAUTE PRESSION"]
     }
     for p_type, keywords in equipment.items():
         if any(k in t for k in keywords):
-            return p_type, "equipment"
+            return p_type, f"equipment, {p_type.lower().replace(' ', '-')}"
 
-    # C. Consumables
+    # Consumables
     consumables = {
         "Vacuum Bags": ["BAG", "SAC"],
         "Vacuum Filters": ["FILTER", "FILTRE", "HEPA", "CARTRIDGE"],
@@ -86,49 +83,25 @@ def classify_product(title_en, title_fr, csv_cat):
         if any(k in t for k in keywords):
             return p_type, "consumable"
 
-    # D. Facilities & Cleaning Supplies (PPE, Food Service, Dispensers)
-    # Safety & PPE
-    if any(k in t for k in ["GLOVE", "GANT", "MASK", "MASQUE", "VEST", "VESTE", "GLASSES", "LUNETTE", "FIRST AID", "SECURIT"]):
-        return "Safety & PPE", "cleaning-supplies, safety"
+    # Maintenance Parts
+    parts_tags = {
+        "motors": ["MOTOR", "MOTEUR", "CARBON", "CHARBON", "ARMATURE", "FAN"],
+        "brushes-tools": ["BRUSH", "BROSSE", "TOOL", "OUTIL", "NOZZLE", "SUCEUR", "WAND", "SQUEEGEE"],
+        "hardware": ["SCREW", "BOLT", "NUT", "WASHER", "RIVET", "VIS", "ECROU"],
+        "gaskets-valves": ["GASKET", "SEAL", "O-RING", "DIAPHRAGM", "VALVE", "JOINT"],
+        "body-components": ["HANDLE", "COVER", "LID", "BASE", "HOUSING", "BUMPER", "LATCH", "TANK"],
+        "electrical": ["WIRE", "CABLE", "PLUG", "SOCKET", "PCB", "RELAY", "CORD", "CIRCUIT"],
+        "switches": ["SWITCH", "INTERRUPTEUR", "BUTTON"],
+        "wheels": ["WHEEL", "CASTER", "ROULETTE"]
+    }
+    for tag, keywords in parts_tags.items():
+        if any(k in t for k in keywords):
+            return "Maintenance Parts", f"parts, {tag}"
 
-    # Food Service
-    if any(k in t for k in ["CUTLERY", "COUTELLERIE", "PLATE", "ASSIETTE", "CUP", "VERRE", "NAPKIN", "SERVIETTE", "TRAY", "PLATEAU", "UTENSIL"]):
-        return "Food Service", "cleaning-supplies, food-service"
-
-    # Dispensers
-    if any(k in t for k in ["DISPENSER", "DISTRIBUTEUR", "TORK", "SANIS", "KIMBERLY"]):
-        return "Dispensers", "cleaning-supplies, dispensers"
-
-    # Paper Products
-    if any(k in t for k in ["PAPER", "TOWEL", "TISSUE", "PAPIER", "ESSUIE-TOUT", "TOILET PAPER"]):
-        return "Paper Products", "cleaning-supplies, paper"
-
-    # Chemicals
-    if any(k in t for k in ["CHEMICAL", "CLEANER", "SOAP", "DETERGENT", "DEGREASER", "SAVON", "NETTOYANT"]):
-        return "Chemicals & Cleaners", "cleaning-supplies, chemicals"
-
-    # E. Maintenance Parts
-    # Hardware & Fasteners
-    if any(k in t for k in ["SCREW", "BOLT", "NUT", "WASHER", "RIVET", "VIS", "ECROU", "RONDELLE"]):
-        return "Hardware & Fasteners", "maintenance, parts"
-    
-    # Seals & Gaskets
-    if any(k in t for k in ["GASKET", "SEAL", "O-RING", "DIAPHRAGM", "VALVE", "JOINT"]):
-        return "Gaskets, Seals & Valves", "maintenance, parts"
-        
-    # Electrical Parts
-    if any(k in t for k in ["MOTOR", "MOTEUR", "WIRE", "CABLE", "PLUG", "SOCKET", "PCB", "RELAY", "CORD", "CIRCUIT", "SWITCH", "INTERRUPTEUR"]):
-        return "Electrical Components", "maintenance, parts"
-        
-    # Wheels & Casters
-    if any(k in t for k in ["WHEEL", "CASTER", "ROULETTE", "ROUE"]):
-        return "Wheels & Casters", "maintenance, parts"
-
-    # F. Fallback (Smart Collection: Needs Review)
-    if cat in ["JOHNNY VAC PARTS (*)", "ALL PARTS", "MISCELLANEOUS", "", "PARTS"] or not title_en:
+    if csv_cat in ["All Parts", "Miscellaneous", "", "Parts"]:
         return "General Maintenance", "needs-review"
     
-    return csv_cat if csv_cat else "General Maintenance", "imported"
+    return csv_cat, "imported"
 
 # --- 4. SYNC LOGIC ---
 def sync_johnnyvac():
@@ -143,86 +116,152 @@ def sync_johnnyvac():
     r.encoding = 'utf-8-sig'
     csv_reader = csv.DictReader(io.StringIO(r.text), delimiter=';')
     
+    # --- EXACT COLUMN MAPPING BASED ON YOUR IMAGE ---
+    # We use lowercase mapping to be safe, but target the keys you provided
+    headers = csv_reader.fieldnames
+    if not headers:
+        print("CRITICAL: CSV has no headers!")
+        return
+
+    # Helper to find column ignoring case
+    def find_col(candidates):
+        for h in headers:
+            if h in candidates:
+                return h
+        return None
+
+    sku_key = find_col(['SKU', 'sku'])
+    title_en_key = find_col(['ProductTitleEN', 'producttitleen'])
+    title_fr_key = find_col(['ProductTitleFR', 'producttitlefr'])
+    price_key = find_col(['RegularPrice', 'regularprice'])
+    qty_key = find_col(['Inventory', 'inventory'])
+    cat_key = find_col(['ProductCategory', 'productcategory'])
+    img_key = find_col(['ImageUrl', 'imageurl'])
+
+    if not sku_key or not title_en_key:
+        print(f"CRITICAL: Missing required columns.\nFound: {headers}")
+        return
+
+    print(f"✓ Columns mapped: SKU='{sku_key}', Title='{title_en_key}', Price='{price_key}'")
+
     jv_products = {}
     for row in csv_reader:
-        sku = row.get('SKU')
-        if sku:
-            jv_products[sku] = {
-                'sku': sku,
-                'title_en': row.get('ProductTitleEN', ''),
-                'title_fr': row.get('ProductTitleFR', ''),
-                'price': row.get('RegularPrice', '0'),
-                'inventory': row.get('Inventory', '0'),
-                'category': row.get('ProductCategory', ''),
-                'imageurl': row.get('ImageUrl', '')
+        if row.get(sku_key):
+            jv_products[row[sku_key]] = {
+                'sku': row[sku_key],
+                'title_en': row.get(title_en_key, ''),
+                'title_fr': row.get(title_fr_key, ''),
+                'price': row.get(price_key, '0'),
+                'inventory': row.get(qty_key, '0'),
+                'category': row.get(cat_key, ''),
+                'imageurl': row.get(img_key, '')
             }
 
-    print(f"✓ Parsed {len(jv_products)} products from JohnnyVac.")
-    if not jv_products: return
+    print(f"✓ Parsed {len(jv_products)} products.")
+    
+    # Debug: Check one product to ensure title is reading
+    first_sku = list(jv_products.keys())[0]
+    print(f"DEBUG: Sample Product [{first_sku}] Title: {jv_products[first_sku]['title_en']}")
 
-    print(f"Step 2: Fetching Shopify Products...")
+    print(f"Step 2: Fetching Shopify Products from {SHOP_URL}...")
+    
     shopify_products = {}
     url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/products.json?limit=250"
     
     while url:
-        resp = session.get(url)
-        if resp.status_code != 200:
-            print(f"Error fetching products: {resp.status_code}")
-            break
+        try:
+            resp = session.get(url)
+            if resp.status_code == 401:
+                print("CRITICAL: 401 Unauthorized. Check credentials.")
+                return
+            resp.raise_for_status()
             
-        data = resp.json()
-        for p in data.get('products', []):
-            if not p['variants']: continue
-            variant = p['variants'][0]
-            if variant.get('sku'):
-                shopify_products[variant['sku']] = {
-                    'product_id': p['id'],
-                    'variant_id': variant['id'],
-                    'inventory_item_id': variant['inventory_item_id'],
-                    'product_type': p['product_type'],
-                    'tags': p['tags'],
-                    'price': variant['price'],
-                    'inventory_quantity': variant['inventory_quantity'],
-                    'image_count': len(p.get('images', []))
-                }
-        url = get_next_link(resp.headers.get('Link'))
+            data = resp.json()
+            for p in data.get('products', []):
+                if not p['variants']: continue
+                variant = p['variants'][0]
+                if variant.get('sku'):
+                    shopify_products[variant['sku']] = {
+                        'product_id': p['id'],
+                        'variant_id': variant['id'],
+                        'inventory_item_id': variant['inventory_item_id'],
+                        'product_type': p['product_type'],
+                        'tags': p['tags'],
+                        'price': variant['price'],
+                        'inventory_quantity': variant['inventory_quantity'],
+                        'image_count': len(p.get('images', []))
+                    }
+            
+            url = get_next_link(resp.headers.get('Link'))
+            if url: print(".", end="", flush=True)
+            
+        except Exception as e:
+            print(f"\nError fetching products: {e}")
+            break
 
-    print(f"✓ Loaded {len(shopify_products)} products from Shopify.")
-    print("Step 3: Processing Sync...")
+    print(f"\n✓ Loaded {len(shopify_products)} matched products.")
+    print("Step 3: Comparing and Syncing...")
 
     update_count = 0
+    
     for sku, jv_item in jv_products.items():
         if sku in shopify_products:
             sh_data = shopify_products[sku]
+            
+            # --- PREPARE DATA ---
+            # Use English title for Shopify, but check BOTH EN/FR for categorization keywords
             new_type, new_tags = classify_product(jv_item['title_en'], jv_item['title_fr'], jv_item['category'])
+            
             jv_price = normalize_price(jv_item['price'])
             sh_price = float(sh_data['price'])
             
+            # Clean inventory string
             qty_clean = jv_item['inventory'].replace(',', '.').strip()
             jv_qty = int(float(qty_clean)) if qty_clean else 0
             
+            # Image Check
+            csv_img_url = jv_item['imageurl'].strip()
+            needs_image = (sh_data['image_count'] == 0) and (csv_img_url != "") and (csv_img_url.startswith('http'))
+
+            # --- DETECT CHANGES ---
             type_changed = sh_data['product_type'] != new_type
             tags_changed = sh_data['tags'] != new_tags
             price_changed = abs(jv_price - sh_price) > 0.01
             qty_changed = sh_data['inventory_quantity'] != jv_qty
 
-            if type_changed or tags_changed or price_changed or qty_changed:
+            if type_changed or tags_changed or price_changed or qty_changed or needs_image:
                 update_count += 1
-                
-                # Update Inventory
+                if update_count % 10 == 0: print(f"Processing update #{update_count} ({sku})...")
+
+                # 1. Update Inventory
                 if qty_changed:
-                    inv_payload = {"location_id": LOCATION_ID, "inventory_item_id": sh_data['inventory_item_id'], "available": jv_qty}
+                    inv_payload = {
+                        "location_id": LOCATION_ID,
+                        "inventory_item_id": sh_data['inventory_item_id'],
+                        "available": jv_qty
+                    }
                     session.post(f"https://{SHOP_URL}/admin/api/{API_VERSION}/inventory_levels/set.json", json=inv_payload)
+                    time.sleep(0.3)
 
-                # Update Meta
+                # 2. Update Metadata
+                prod_payload = {"id": sh_data['product_id']}
+                if type_changed: prod_payload["product_type"] = new_type
+                if tags_changed: prod_payload["tags"] = new_tags
+                if price_changed:
+                    prod_payload["variants"] = [{"id": sh_data['variant_id'], "price": str(jv_price)}]
+
                 if type_changed or tags_changed or price_changed:
-                    prod_payload = {"id": sh_data['product_id']}
-                    if type_changed: prod_payload["product_type"] = new_type
-                    if tags_changed: prod_payload["tags"] = new_tags
-                    if price_changed: prod_payload["variants"] = [{"id": sh_data['variant_id'], "price": str(jv_price)}]
                     session.put(f"https://{SHOP_URL}/admin/api/{API_VERSION}/products/{sh_data['product_id']}.json", json={"product": prod_payload})
+                    time.sleep(0.5)
 
-    print(f"\nSync Complete. Total Updates: {update_count}")
+                # 3. Update Image
+                if needs_image:
+                    print(f"  + Uploading image for {sku}")
+                    image_payload = {"image": {"src": csv_img_url}}
+                    session.post(f"https://{SHOP_URL}/admin/api/{API_VERSION}/products/{sh_data['product_id']}/images.json", json=image_payload)
+                    time.sleep(1.0) 
+
+    print(f"\nSync Complete. {update_count} products updated.")
 
 if __name__ == "__main__":
     sync_johnnyvac()
