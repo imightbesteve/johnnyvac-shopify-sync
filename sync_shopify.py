@@ -70,34 +70,47 @@ def classify_product(title_en, title_fr, csv_cat):
     }
     for p_type, keywords in equipment.items():
         if any(k in t for k in keywords):
-            return p_type, f"equipment, {p_type.lower().replace(' ', '-')}"
+            return p_type, f"equipment, {p_type.lower().replace(' ', '-').replace('&', 'and')}"
 
     # Consumables
     consumables = {
         "Vacuum Bags": ["BAG", "SAC"],
         "Vacuum Filters": ["FILTER", "FILTRE", "HEPA", "CARTRIDGE"],
         "Vacuum Belts": ["BELT", "COURROIE"],
-        "Vacuum Hoses": ["HOSE", "BOYAU", "MANCHON", "CUFF"]
+        "Vacuum Hoses": ["HOSE", "BOYAU", "MANCHON", "CUFF"],
+        "Paper Products": [
+            "TOILET", "TISSUE", "PAPER TOWEL", "HAND TOWEL", "ROLL TOWEL", 
+            "NAPKIN", "KLEENEX", "PAPIER HYGIENIQUE", "ESSUIE-MAINS", "MOUCHOIR"
+        ]
     }
     for p_type, keywords in consumables.items():
         if any(k in t for k in keywords):
             return p_type, "consumable"
 
-    # Maintenance Parts
-    parts_tags = {
-        "motors": ["MOTOR", "MOTEUR", "CARBON", "CHARBON", "ARMATURE", "FAN"],
-        "brushes-tools": ["BRUSH", "BROSSE", "TOOL", "OUTIL", "NOZZLE", "SUCEUR", "WAND", "SQUEEGEE"],
-        "hardware": ["SCREW", "BOLT", "NUT", "WASHER", "RIVET", "VIS", "ECROU"],
-        "gaskets-valves": ["GASKET", "SEAL", "O-RING", "DIAPHRAGM", "VALVE", "JOINT"],
-        "body-components": ["HANDLE", "COVER", "LID", "BASE", "HOUSING", "BUMPER", "LATCH", "TANK"],
-        "electrical": ["WIRE", "CABLE", "PLUG", "SOCKET", "PCB", "RELAY", "CORD", "CIRCUIT"],
-        "switches": ["SWITCH", "INTERRUPTEUR", "BUTTON"],
-        "wheels": ["WHEEL", "CASTER", "ROULETTE"]
-    }
-    for tag, keywords in parts_tags.items():
-        if any(k in t for k in keywords):
-            return "Maintenance Parts", f"parts, {tag}"
+    # Chemicals & Solutions
+    if any(k in t for k in ["DETERGENT", "SOAP", "SAVON", "DEGREASER", "SHAMPOO", 
+                            "CHIMIQUE", "CLEANER", "NETTOYANT", "SANITIZER", "DESINFECTANT"]):
+        return "Chemicals & Solutions", "janitorial, chemicals-solutions"
 
+    # Maintenance Parts - Use specific Product Types
+    maintenance_map = {
+        "Motors & Fans": ["MOTOR", "MOTEUR", "CARBON", "CHARBON", "ARMATURE", "FAN"],
+        "Brushes & Tools": ["BRUSH", "BROSSE", "TOOL", "OUTIL", "NOZZLE", "SUCEUR", "WAND", "SQUEEGEE"],
+        "Hardware & Fasteners": ["SCREW", "BOLT", "NUT", "WASHER", "RIVET", "VIS", "ECROU"],
+        "Gaskets, Seals & Valves": ["GASKET", "SEAL", "O-RING", "DIAPHRAGM", "VALVE", "JOINT"],
+        "Body Components & Housing": ["HANDLE", "COVER", "LID", "BASE", "HOUSING", "BUMPER", "LATCH", "TANK"],
+        "Electrical Components": ["WIRE", "CABLE", "PLUG", "SOCKET", "PCB", "RELAY", "CORD", "CIRCUIT", "FUSE"],
+        "Switches": ["SWITCH", "INTERRUPTEUR", "BUTTON"],
+        "Wheels & Casters": ["WHEEL", "CASTER", "ROULETTE"]
+    }
+    
+    for p_type, keywords in maintenance_map.items():
+        if any(k in t for k in keywords):
+            # Create clean tag handling commas and ampersands
+            tag_slug = p_type.lower().replace(" & ", "-").replace(", ", "-").replace(" ", "-")
+            return p_type, f"parts, {tag_slug}"
+
+    # Fallback
     if csv_cat in ["All Parts", "Miscellaneous", "", "Parts"]:
         return "General Maintenance", "needs-review"
     
@@ -116,8 +129,6 @@ def sync_johnnyvac():
     r.encoding = 'utf-8-sig'
     csv_reader = csv.DictReader(io.StringIO(r.text), delimiter=';')
     
-    # --- EXACT COLUMN MAPPING BASED ON YOUR IMAGE ---
-    # We use lowercase mapping to be safe, but target the keys you provided
     headers = csv_reader.fieldnames
     if not headers:
         print("CRITICAL: CSV has no headers!")
@@ -209,7 +220,6 @@ def sync_johnnyvac():
             sh_data = shopify_products[sku]
             
             # --- PREPARE DATA ---
-            # Use English title for Shopify, but check BOTH EN/FR for categorization keywords
             new_type, new_tags = classify_product(jv_item['title_en'], jv_item['title_fr'], jv_item['category'])
             
             jv_price = normalize_price(jv_item['price'])
