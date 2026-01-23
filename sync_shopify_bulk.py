@@ -131,7 +131,9 @@ def fetch_shopify_products() -> Dict[str, dict]:
                         inventoryLevels(first: 1) {
                           edges {
                             node {
-                              available
+                              quantities(names: "available") {
+                                quantity
+                              }
                             }
                           }
                         }
@@ -169,7 +171,9 @@ def fetch_shopify_products() -> Dict[str, dict]:
                 # Get inventory if available
                 inventory = 0
                 if variant["inventoryItem"]["inventoryLevels"]["edges"]:
-                    inventory = variant["inventoryItem"]["inventoryLevels"]["edges"][0]["node"]["available"]
+                    level_node = variant["inventoryItem"]["inventoryLevels"]["edges"][0]["node"]
+                    if level_node.get("quantities"):
+                        inventory = level_node["quantities"][0]["quantity"]
                 
                 products[sku] = {
                     "product_id": node["id"],
