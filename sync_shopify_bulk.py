@@ -259,6 +259,7 @@ def build_bulk_operations(jv_rows: List[dict], shopify_products: Dict[str, dict]
                 updates.append({
                     "input": {
                         "id": existing["product_id"],
+                        "productOptions": [],
                         "productType": category,
                         "variants": [{
                             "id": existing["variant_id"],
@@ -285,17 +286,22 @@ def build_bulk_operations(jv_rows: List[dict], shopify_products: Dict[str, dict]
                 creates.append({
                     "input": {
                         "title": title,
+                        "productOptions": [],
                         "productType": category,
                         "vendor": "JohnnyVac",
                         "status": "ACTIVE",
                         "variants": [{
+                            "optionValues": [],
                             "sku": sku,
                             "price": str(price),
-                            "inventoryManagement": "SHOPIFY",
-                            "inventoryPolicy": "DENY"
+                            "inventoryPolicy": "DENY",
+                            "inventoryItem": {
+                                "tracked": True
+                            }
                         }],
-                        "images": [{
-                            "src": image_url
+                        "media": [{
+                            "originalSource": image_url,
+                            "mediaContentType": "IMAGE"
                         }],
                         "metafields": [{
                             "namespace": "kingsway",
@@ -381,7 +387,7 @@ def run_bulk_operation(operations: List[dict]) -> bool:
         bulk_mutation = f"""
         mutation {{
           bulkOperationRunMutation(
-            mutation: "mutation call($input: ProductInput!) {{ productSet(input: $input) {{ product {{ id }} userErrors {{ message field }} }} }}",
+            mutation: "mutation call($input: ProductSetInput!) {{ productSet(input: $input) {{ product {{ id }} userErrors {{ message field }} }} }}",
             stagedUploadPath: "{resource_url}"
           ) {{
             bulkOperation {{
