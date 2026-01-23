@@ -1,32 +1,50 @@
-name: Sync JohnnyVac to Shopify
+name: JohnnyVac Shopify Sync
 
 on:
   schedule:
-    # Runs every day at 6 AM UTC (1 AM EST)
+    # Run daily at 6 AM UTC (after JohnnyVac CSV updates)
     - cron: '0 6 * * *'
+  
+  # Allow manual trigger
   workflow_dispatch:
-    # Allows you to click "Run workflow" manually at any time
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
     
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install requests
 
-      - name: Run sync script
+      - name: Verify files exist
+        run: |
+          ls -la
+          test -f sync_shopify_bulk.py || (echo "❌ sync_shopify_bulk.py not found" && exit 1)
+          test -f category_map.json || (echo "❌ category_map.json not found" && exit 1)
+
+      - name: Run sync
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-        run: python sync_shopify.py
+        run: python sync_shopify_bulk.py
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ $? -eq 0 ]; then
+            echo "✅ Sync completed successfully"
+          else
+            echo "❌ Sync failed with errors"
+            exit 1
+          fi
