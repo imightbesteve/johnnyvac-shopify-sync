@@ -1,277 +1,545 @@
 import csv
-import time
-import requests
 import io
-import re
+import json
 import os
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import time
+import hashlib
+import requests
+from typing import Dict, List, Tuple
 
-# --- CONFIGURATION ---
-# Pulls credentials from your environment variables
-SHOP_URL = os.getenv("SHOPIFY_STORE", "").replace("https://", "").strip()
-API_PASSWORD = os.getenv("SHOPIFY_ACCESS_TOKEN", "").strip()
-LOCATION_ID = "107962957846"
+# Configuration
+SHOP = os.environ["SHOPIFY_STORE"].replace("https://", "").replace("/", "")
+TOKEN = os.environ["SHOPIFY_ACCESS_TOKEN"]
+API_VERSION = "2025-01"
 CSV_URL = "https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv"
-API_VERSION = "2025-10" 
+
+GRAPHQL_URL = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
+REST_BASE = f"https://{SHOP}/admin/api/{API_VERSION}"
 
 HEADERS = {
-    "X-Shopify-Access-Token": API_PASSWORD,
+    "X-Shopify-Access-Token": TOKEN,
     "Content-Type": "application/json"
 }
 
-# --- 1. ROBUST SESSION SETUP ---
-def get_smart_session():
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=5,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "PUT", "POST"]
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("https://", adapter)
-    session.headers.update(HEADERS)
-    return session
+LOCATION_ID = "107962957846"
 
-session = get_smart_session()
+# Load category mapping
+try:
+    with open("category_map.json", "r") as f:
+        CATEGORY_MAP = json.load(f)
+except FileNotFoundError:
+    print("⚠️  category_map.json not found, using empty category map")
+    CATEGORY_MAP = {}
 
-# --- 2. DATA HELPER FUNCTIONS ---
-def normalize_price(price_str):
-    if not price_str: return 0.0
+# ---------------- UTILITIES ----------------
+
+def sha1_hash(*values):
+    """Create consistent hash from product data"""
+    raw = "|".join(str(v).strip() for v in values)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+def classify_category(text: str) -> str:
+    """Match product to category using keyword mapping"""
+    t = text.upper()
+    for key, cat in CATEGORY_MAP.items():
+        if key.upper() in t:
+            return cat
+    return "Misc / Uncategorized"
+
+def graphql_request(query: str, variables: dict = None) -> dict:
+    """Make GraphQL request with error handling"""
     try:
-        # Handle "12,50" -> 12.50
-        return float(str(price_str).replace(',', '.').strip())
-    except ValueError:
-        return 0.0
+        payload = {"query": query}
+        if variables:
+            payload["variables"] = variables
+            
+        response = requests.post(
+            GRAPHQL_URL, 
+            headers=HEADERS, 
+            json=payload,
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        # Check for GraphQL errors
+        if "errors" in data:
+            raise Exception(f"GraphQL errors: {data['errors']}")
+            
+        return data
+        
+    except requests.exceptions.RequestException as e:
+        print(f"❌ GraphQL request failed: {e}")
+        raise
 
-def get_next_link(link_header):
-    if not link_header: return None
-    match = re.search(r'<([^>]+)>;\s*rel="next"', link_header)
-    return match.group(1) if match else None
+# ---------------- FETCH CSV ----------------
 
-# --- 3. CATEGORIZATION ENGINE ---
-def classify_product(title_en, title_fr, csv_cat):
-    # Combine EN/FR titles for richer keyword matching
-    t = f"{str(title_en)} {str(title_fr)}".upper()
+def load_csv() -> List[dict]:
+    """Download and parse JohnnyVac CSV feed"""
+    print("📥 Downloading CSV from JohnnyVac...")
     
-    # Administrative
-    if any(k in t for k in ["RARELY ORDERED", "DISCONTINUED", "ADJUSTED PRICE"]):
-        return "Discontinued / Special Order", "admin, discontinued"
-
-    # Equipment
-    equipment = {
-        "Commercial Vacuums": ["COMMERCIAL VAC", "BACKPACK", "CANISTER", "UPRIGHT"],
-        "Central Vacuums": ["CENTRAL VAC", "ASPIRATEUR CENTRAL"],
-        "Carpet Extractors": ["EXTRACTOR", "CARPET CLEANER"],
-        "Automatic Scrubbers": ["SCRUBBER", "AUTO-SCRUBBER"],
-        "Floor Machines & Burnishers": ["BURNISHER", "POLISHER", "FLOOR MACHINE"],
-        "Pressure Washers": ["PRESSURE WASHER", "NETTOYEUR HAUTE PRESSION"]
-    }
-    for p_type, keywords in equipment.items():
-        if any(k in t for k in keywords):
-            return p_type, f"equipment, {p_type.lower().replace(' ', '-').replace('&', 'and')}"
-
-    # Consumables
-    consumables = {
-        "Vacuum Bags": ["BAG", "SAC"],
-        "Vacuum Filters": ["FILTER", "FILTRE", "HEPA", "CARTRIDGE"],
-        "Vacuum Belts": ["BELT", "COURROIE"],
-        "Vacuum Hoses": ["HOSE", "BOYAU", "MANCHON", "CUFF"],
-        "Paper Products": [
-            "TOILET", "TISSUE", "PAPER TOWEL", "HAND TOWEL", "ROLL TOWEL", 
-            "NAPKIN", "KLEENEX", "PAPIER HYGIENIQUE", "ESSUIE-MAINS", "MOUCHOIR"
-        ]
-    }
-    for p_type, keywords in consumables.items():
-        if any(k in t for k in keywords):
-            return p_type, "consumable"
-
-    # Chemicals & Solutions
-    if any(k in t for k in ["DETERGENT", "SOAP", "SAVON", "DEGREASER", "SHAMPOO", 
-                            "CHIMIQUE", "CLEANER", "NETTOYANT", "SANITIZER", "DESINFECTANT"]):
-        return "Chemicals & Solutions", "janitorial, chemicals-solutions"
-
-    # Maintenance Parts - Use specific Product Types
-    maintenance_map = {
-        "Motors & Fans": ["MOTOR", "MOTEUR", "CARBON", "CHARBON", "ARMATURE", "FAN"],
-        "Brushes & Tools": ["BRUSH", "BROSSE", "TOOL", "OUTIL", "NOZZLE", "SUCEUR", "WAND", "SQUEEGEE"],
-        "Hardware & Fasteners": ["SCREW", "BOLT", "NUT", "WASHER", "RIVET", "VIS", "ECROU"],
-        "Gaskets, Seals & Valves": ["GASKET", "SEAL", "O-RING", "DIAPHRAGM", "VALVE", "JOINT"],
-        "Body Components & Housing": ["HANDLE", "COVER", "LID", "BASE", "HOUSING", "BUMPER", "LATCH", "TANK"],
-        "Electrical Components": ["WIRE", "CABLE", "PLUG", "SOCKET", "PCB", "RELAY", "CORD", "CIRCUIT", "FUSE"],
-        "Switches": ["SWITCH", "INTERRUPTEUR", "BUTTON"],
-        "Wheels & Casters": ["WHEEL", "CASTER", "ROULETTE"]
-    }
-    
-    for p_type, keywords in maintenance_map.items():
-        if any(k in t for k in keywords):
-            # Create clean tag handling commas and ampersands
-            tag_slug = p_type.lower().replace(" & ", "-").replace(", ", "-").replace(" ", "-")
-            return p_type, f"parts, {tag_slug}"
-
-    # Fallback
-    if csv_cat in ["All Parts", "Miscellaneous", "", "Parts"]:
-        return "General Maintenance", "needs-review"
-    
-    return csv_cat, "imported"
-
-# --- 4. SYNC LOGIC ---
-def sync_johnnyvac():
-    print("Step 1: Downloading JohnnyVac CSV...")
     try:
-        r = requests.get(CSV_URL, timeout=60)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"CRITICAL: Could not download CSV. {e}")
-        return
+        response = requests.get(CSV_URL, timeout=60)
+        response.raise_for_status()
+        
+        # Parse CSV with semicolon delimiter
+        reader = csv.DictReader(
+            io.StringIO(response.text), 
+            delimiter=";"
+        )
+        rows = list(reader)
+        
+        print(f"✅ Loaded {len(rows)} products from CSV")
+        return rows
+        
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Failed to download CSV: {e}")
+        raise
 
-    r.encoding = 'utf-8-sig'
-    csv_reader = csv.DictReader(io.StringIO(r.text), delimiter=';')
+# ---------------- FETCH SHOPIFY STATE (WITH PAGINATION) ----------------
+
+def fetch_shopify_products() -> Dict[str, dict]:
+    """Fetch all products from Shopify with pagination"""
+    print("📥 Fetching existing Shopify products...")
     
-    headers = csv_reader.fieldnames
-    if not headers:
-        print("CRITICAL: CSV has no headers!")
-        return
-
-    # Helper to find column ignoring case
-    def find_col(candidates):
-        for h in headers:
-            if h in candidates:
-                return h
-        return None
-
-    sku_key = find_col(['SKU', 'sku'])
-    title_en_key = find_col(['ProductTitleEN', 'producttitleen'])
-    title_fr_key = find_col(['ProductTitleFR', 'producttitlefr'])
-    price_key = find_col(['RegularPrice', 'regularprice'])
-    qty_key = find_col(['Inventory', 'inventory'])
-    cat_key = find_col(['ProductCategory', 'productcategory'])
-    img_key = find_col(['ImageUrl', 'imageurl'])
-
-    if not sku_key or not title_en_key:
-        print(f"CRITICAL: Missing required columns.\nFound: {headers}")
-        return
-
-    print(f"✓ Columns mapped: SKU='{sku_key}', Title='{title_en_key}', Price='{price_key}'")
-
-    jv_products = {}
-    for row in csv_reader:
-        if row.get(sku_key):
-            jv_products[row[sku_key]] = {
-                'sku': row[sku_key],
-                'title_en': row.get(title_en_key, ''),
-                'title_fr': row.get(title_fr_key, ''),
-                'price': row.get(price_key, '0'),
-                'inventory': row.get(qty_key, '0'),
-                'category': row.get(cat_key, ''),
-                'imageurl': row.get(img_key, '')
+    products = {}
+    has_next = True
+    cursor = None
+    page = 1
+    
+    while has_next:
+        query = """
+        query($cursor: String) {
+          products(first: 250, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
             }
-
-    print(f"✓ Parsed {len(jv_products)} products.")
-    
-    # Debug: Check one product to ensure title is reading
-    first_sku = list(jv_products.keys())[0]
-    print(f"DEBUG: Sample Product [{first_sku}] Title: {jv_products[first_sku]['title_en']}")
-
-    print(f"Step 2: Fetching Shopify Products from {SHOP_URL}...")
-    
-    shopify_products = {}
-    url = f"https://{SHOP_URL}/admin/api/{API_VERSION}/products.json?limit=250"
-    
-    while url:
-        try:
-            resp = session.get(url)
-            if resp.status_code == 401:
-                print("CRITICAL: 401 Unauthorized. Check credentials.")
-                return
-            resp.raise_for_status()
-            
-            data = resp.json()
-            for p in data.get('products', []):
-                if not p['variants']: continue
-                variant = p['variants'][0]
-                if variant.get('sku'):
-                    shopify_products[variant['sku']] = {
-                        'product_id': p['id'],
-                        'variant_id': variant['id'],
-                        'inventory_item_id': variant['inventory_item_id'],
-                        'product_type': p['product_type'],
-                        'tags': p['tags'],
-                        'price': variant['price'],
-                        'inventory_quantity': variant['inventory_quantity'],
-                        'image_count': len(p.get('images', []))
+            edges {
+              node {
+                id
+                title
+                variants(first: 1) {
+                  edges {
+                    node {
+                      id
+                      sku
+                      price
+                      inventoryItem {
+                        id
+                        inventoryLevels(first: 1) {
+                          edges {
+                            node {
+                              available
+                            }
+                          }
+                        }
+                      }
                     }
+                  }
+                }
+                metafield(namespace: "kingsway", key: "source_hash") {
+                  value
+                }
+              }
+            }
+          }
+        }
+        """
+        
+        try:
+            data = graphql_request(query, {"cursor": cursor})
+            products_data = data["data"]["products"]
             
-            url = get_next_link(resp.headers.get('Link'))
-            if url: print(".", end="", flush=True)
+            # Process products
+            for edge in products_data["edges"]:
+                node = edge["node"]
+                
+                # Skip products without variants
+                if not node["variants"]["edges"]:
+                    continue
+                    
+                variant = node["variants"]["edges"][0]["node"]
+                sku = variant["sku"]
+                
+                if not sku:
+                    continue
+                
+                # Get inventory if available
+                inventory = 0
+                if variant["inventoryItem"]["inventoryLevels"]["edges"]:
+                    inventory = variant["inventoryItem"]["inventoryLevels"]["edges"][0]["node"]["available"]
+                
+                products[sku] = {
+                    "product_id": node["id"],
+                    "variant_id": variant["id"],
+                    "inventory_item_id": variant["inventoryItem"]["id"],
+                    "inventory": inventory,
+                    "price": float(variant["price"]),
+                    "source_hash": node["metafield"]["value"] if node["metafield"] else None
+                }
+            
+            has_next = products_data["pageInfo"]["hasNextPage"]
+            cursor = products_data["pageInfo"]["endCursor"]
+            
+            print(f"  Page {page}: {len(products_data['edges'])} products (total: {len(products)})")
+            page += 1
+            
+            # Rate limit protection
+            time.sleep(0.5)
             
         except Exception as e:
-            print(f"\nError fetching products: {e}")
-            break
-
-    print(f"\n✓ Loaded {len(shopify_products)} matched products.")
-    print("Step 3: Comparing and Syncing...")
-
-    update_count = 0
+            print(f"❌ Error fetching products page {page}: {e}")
+            raise
     
-    for sku, jv_item in jv_products.items():
-        if sku in shopify_products:
-            sh_data = shopify_products[sku]
-            
-            # --- PREPARE DATA ---
-            new_type, new_tags = classify_product(jv_item['title_en'], jv_item['title_fr'], jv_item['category'])
-            
-            jv_price = normalize_price(jv_item['price'])
-            sh_price = float(sh_data['price'])
-            
-            # Clean inventory string
-            qty_clean = jv_item['inventory'].replace(',', '.').strip()
-            jv_qty = int(float(qty_clean)) if qty_clean else 0
-            
-            # Image Check
-            csv_img_url = jv_item['imageurl'].strip()
-            needs_image = (sh_data['image_count'] == 0) and (csv_img_url != "") and (csv_img_url.startswith('http'))
+    print(f"✅ Fetched {len(products)} existing products from Shopify")
+    return products
 
-            # --- DETECT CHANGES ---
-            type_changed = sh_data['product_type'] != new_type
-            tags_changed = sh_data['tags'] != new_tags
-            price_changed = abs(jv_price - sh_price) > 0.01
-            qty_changed = sh_data['inventory_quantity'] != jv_qty
+# ---------------- BUILD BULK JSONL ----------------
 
-            if type_changed or tags_changed or price_changed or qty_changed or needs_image:
-                update_count += 1
-                if update_count % 10 == 0: print(f"Processing update #{update_count} ({sku})...")
-
-                # 1. Update Inventory
-                if qty_changed:
-                    inv_payload = {
-                        "location_id": LOCATION_ID,
-                        "inventory_item_id": sh_data['inventory_item_id'],
-                        "available": jv_qty
+def build_bulk_operations(jv_rows: List[dict], shopify_products: Dict[str, dict]) -> Tuple[List[dict], List[dict]]:
+    """Build operations for products that need creating/updating"""
+    print("🔨 Building bulk operations...")
+    
+    creates = []
+    updates = []
+    inventory_updates = []
+    skipped = 0
+    
+    for row in jv_rows:
+        sku = row.get("SKU", "").strip()
+        if not sku:
+            continue
+        
+        try:
+            # Build product data
+            title_en = row.get("ProductTitleEN", "").strip()
+            title_fr = row.get("ProductTitleFR", "").strip()
+            title = f"{title_en} / {title_fr}" if title_en and title_fr else (title_en or title_fr or sku)
+            
+            category_text = " ".join([
+                row.get("ProductCategory", ""),
+                title_en,
+                title_fr,
+                row.get("ProductDescriptionEN", "")[:100],
+                row.get("ProductDescriptionFR", "")[:100]
+            ])
+            category = classify_category(category_text)
+            
+            # Parse price and inventory
+            price_str = str(row.get("RegularPrice", "0")).replace(",", ".")
+            price = float(price_str) if price_str else 0.0
+            
+            inv_str = str(row.get("Inventory", "0")).replace(",", ".")
+            qty = int(float(inv_str)) if inv_str else 0
+            
+            # Image URL
+            image_url = row.get("ImageUrl", "").strip()
+            if not image_url:
+                image_url = f"https://www.johnnyvacstock.com/photos/web/{sku}.jpg"
+            
+            # Calculate source hash
+            source_hash = sha1_hash(price, qty, image_url, category, title)
+            
+            # Check if product exists
+            if sku in shopify_products:
+                existing = shopify_products[sku]
+                
+                # Skip if unchanged
+                if existing["source_hash"] == source_hash:
+                    skipped += 1
+                    continue
+                
+                # Update existing product
+                updates.append({
+                    "input": {
+                        "id": existing["product_id"],
+                        "productType": category,
+                        "variants": [{
+                            "id": existing["variant_id"],
+                            "price": str(price)
+                        }],
+                        "metafields": [{
+                            "namespace": "kingsway",
+                            "key": "source_hash",
+                            "type": "single_line_text_field",
+                            "value": source_hash
+                        }]
                     }
-                    session.post(f"https://{SHOP_URL}/admin/api/{API_VERSION}/inventory_levels/set.json", json=inv_payload)
-                    time.sleep(0.3)
+                })
+                
+                # Queue inventory update if changed
+                if existing["inventory"] != qty:
+                    inventory_updates.append({
+                        "inventory_item_id": existing["inventory_item_id"],
+                        "available": qty,
+                        "sku": sku
+                    })
+            else:
+                # Create new product
+                creates.append({
+                    "input": {
+                        "title": title,
+                        "productType": category,
+                        "vendor": "JohnnyVac",
+                        "status": "ACTIVE",
+                        "variants": [{
+                            "sku": sku,
+                            "price": str(price),
+                            "inventoryManagement": "SHOPIFY",
+                            "inventoryPolicy": "DENY"
+                        }],
+                        "images": [{
+                            "src": image_url
+                        }],
+                        "metafields": [{
+                            "namespace": "kingsway",
+                            "key": "source_hash",
+                            "type": "single_line_text_field",
+                            "value": source_hash
+                        }]
+                    }
+                })
+                
+        except Exception as e:
+            print(f"⚠️  Error processing SKU {sku}: {e}")
+            continue
+    
+    print(f"✅ Operations: {len(creates)} creates, {len(updates)} updates, {skipped} skipped")
+    print(f"📦 Inventory updates queued: {len(inventory_updates)}")
+    
+    return creates + updates, inventory_updates
 
-                # 2. Update Metadata
-                prod_payload = {"id": sh_data['product_id']}
-                if type_changed: prod_payload["product_type"] = new_type
-                if tags_changed: prod_payload["tags"] = new_tags
-                if price_changed:
-                    prod_payload["variants"] = [{"id": sh_data['variant_id'], "price": str(jv_price)}]
+# ---------------- RUN BULK OPERATION ----------------
 
-                if type_changed or tags_changed or price_changed:
-                    session.put(f"https://{SHOP_URL}/admin/api/{API_VERSION}/products/{sh_data['product_id']}.json", json={"product": prod_payload})
-                    time.sleep(0.5)
+def run_bulk_operation(operations: List[dict]) -> bool:
+    """Execute bulk mutation and wait for completion"""
+    if not operations:
+        print("ℹ️  No operations to run")
+        return True
+    
+    print(f"🚀 Starting bulk operation with {len(operations)} mutations...")
+    
+    try:
+        # Step 1: Create staged upload
+        print("  1/4 Creating staged upload...")
+        stage_mutation = """
+        mutation {
+          stagedUploadsCreate(
+            input: {
+              resource: BULK_MUTATION_VARIABLES,
+              filename: "bulk_operation.jsonl",
+              mimeType: "text/jsonl",
+              httpMethod: PUT
+            }
+          ) {
+            userErrors {
+              field
+              message
+            }
+            stagedTargets {
+              url
+              resourceUrl
+              parameters {
+                name
+                value
+              }
+            }
+          }
+        }
+        """
+        
+        stage_result = graphql_request(stage_mutation)
+        
+        if stage_result["data"]["stagedUploadsCreate"]["userErrors"]:
+            errors = stage_result["data"]["stagedUploadsCreate"]["userErrors"]
+            raise Exception(f"Staging errors: {errors}")
+        
+        staged_target = stage_result["data"]["stagedUploadsCreate"]["stagedTargets"][0]
+        upload_url = staged_target["url"]
+        resource_url = staged_target["resourceUrl"]
+        
+        # Step 2: Create JSONL file
+        print("  2/4 Uploading operations...")
+        jsonl_content = "\n".join(json.dumps(op) for op in operations)
+        
+        upload_response = requests.put(
+            upload_url,
+            data=jsonl_content.encode('utf-8'),
+            headers={"Content-Type": "text/jsonl"},
+            timeout=120
+        )
+        upload_response.raise_for_status()
+        
+        # Step 3: Start bulk operation
+        print("  3/4 Starting bulk mutation...")
+        bulk_mutation = f"""
+        mutation {{
+          bulkOperationRunMutation(
+            mutation: "mutation call($input: ProductInput!) {{ productSet(input: $input) {{ product {{ id }} userErrors {{ message field }} }} }}",
+            stagedUploadPath: "{resource_url}"
+          ) {{
+            bulkOperation {{
+              id
+              status
+            }}
+            userErrors {{
+              field
+              message
+            }}
+          }}
+        }}
+        """
+        
+        bulk_result = graphql_request(bulk_mutation)
+        
+        if bulk_result["data"]["bulkOperationRunMutation"]["userErrors"]:
+            errors = bulk_result["data"]["bulkOperationRunMutation"]["userErrors"]
+            raise Exception(f"Bulk operation errors: {errors}")
+        
+        operation_id = bulk_result["data"]["bulkOperationRunMutation"]["bulkOperation"]["id"]
+        print(f"  Operation ID: {operation_id}")
+        
+        # Step 4: Poll for completion
+        print("  4/4 Waiting for completion...")
+        return poll_bulk_operation(operation_id)
+        
+    except Exception as e:
+        print(f"❌ Bulk operation failed: {e}")
+        return False
 
-                # 3. Update Image
-                if needs_image:
-                    print(f"  + Uploading image for {sku}")
-                    image_payload = {"image": {"src": csv_img_url}}
-                    session.post(f"https://{SHOP_URL}/admin/api/{API_VERSION}/products/{sh_data['product_id']}/images.json", json=image_payload)
-                    time.sleep(1.0) 
+def poll_bulk_operation(operation_id: str, max_wait: int = 1800) -> bool:
+    """Poll bulk operation status until complete"""
+    start_time = time.time()
+    
+    while True:
+        # Check timeout
+        if time.time() - start_time > max_wait:
+            print(f"⏱️  Timeout waiting for bulk operation")
+            return False
+        
+        query = f"""
+        {{
+          node(id: "{operation_id}") {{
+            ... on BulkOperation {{
+              id
+              status
+              errorCode
+              createdAt
+              completedAt
+              objectCount
+              fileSize
+              url
+            }}
+          }}
+        }}
+        """
+        
+        try:
+            result = graphql_request(query)
+            operation = result["data"]["node"]
+            
+            status = operation["status"]
+            count = operation.get("objectCount", 0)
+            
+            if status == "COMPLETED":
+                print(f"✅ Bulk operation completed: {count} objects processed")
+                return True
+                
+            elif status in ["FAILED", "CANCELED"]:
+                error_code = operation.get("errorCode", "UNKNOWN")
+                print(f"❌ Bulk operation {status.lower()}: {error_code}")
+                return False
+                
+            elif status in ["RUNNING", "CREATED"]:
+                elapsed = int(time.time() - start_time)
+                print(f"  ⏳ Status: {status}, Objects: {count}, Elapsed: {elapsed}s")
+                time.sleep(10)
+                
+            else:
+                print(f"  ⏳ Status: {status}")
+                time.sleep(5)
+                
+        except Exception as e:
+            print(f"⚠️  Error polling status: {e}")
+            time.sleep(5)
 
-    print(f"\nSync Complete. {update_count} products updated.")
+# ---------------- UPDATE INVENTORY ----------------
+
+def update_inventory(updates: List[dict]) -> None:
+    """Update inventory levels for existing products"""
+    if not updates:
+        print("ℹ️  No inventory updates needed")
+        return
+    
+    print(f"📦 Updating inventory for {len(updates)} products...")
+    
+    success = 0
+    failed = 0
+    
+    for update in updates:
+        try:
+            response = requests.post(
+                f"{REST_BASE}/inventory_levels/set.json",
+                headers=HEADERS,
+                json={
+                    "location_id": LOCATION_ID,
+                    "inventory_item_id": update["inventory_item_id"],
+                    "available": update["available"]
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            success += 1
+            
+            # Rate limiting
+            time.sleep(0.3)
+            
+        except Exception as e:
+            failed += 1
+            print(f"  ⚠️  Failed to update inventory for {update.get('sku', 'unknown')}: {e}")
+    
+    print(f"✅ Inventory updates: {success} successful, {failed} failed")
+
+# ---------------- MAIN ----------------
+
+def main():
+    """Main sync process"""
+    print("=" * 60)
+    print("JohnnyVac → Shopify Sync (GraphQL)")
+    print("=" * 60)
+    
+    try:
+        # Step 1: Load CSV
+        jv_rows = load_csv()
+        
+        # Step 2: Fetch Shopify state
+        shopify_products = fetch_shopify_products()
+        
+        # Step 3: Build operations
+        operations, inventory_updates = build_bulk_operations(jv_rows, shopify_products)
+        
+        # Step 4: Run bulk operation
+        if operations:
+            success = run_bulk_operation(operations)
+            if not success:
+                print("⚠️  Bulk operation did not complete successfully")
+                return
+        
+        # Step 5: Update inventory (only for existing products)
+        if inventory_updates:
+            update_inventory(inventory_updates)
+        
+        print("=" * 60)
+        print("✅ Sync completed successfully")
+        print("=" * 60)
+        
+    except Exception as e:
+        print("=" * 60)
+        print(f"❌ Sync failed: {e}")
+        print("=" * 60)
+        raise
 
 if __name__ == "__main__":
-    sync_johnnyvac()
+    main()
