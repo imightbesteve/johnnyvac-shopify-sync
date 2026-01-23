@@ -175,10 +175,14 @@ def fetch_shopify_products() -> Dict[str, dict]:
                     if level_node.get("quantities"):
                         inventory = level_node["quantities"][0]["quantity"]
                 
+                # Extract numeric ID from GraphQL global ID (gid://shopify/InventoryItem/12345 -> 12345)
+                inventory_item_gid = variant["inventoryItem"]["id"]
+                inventory_item_id = inventory_item_gid.split("/")[-1]
+                
                 products[sku] = {
                     "product_id": node["id"],
                     "variant_id": variant["id"],
-                    "inventory_item_id": variant["inventoryItem"]["id"],
+                    "inventory_item_id": inventory_item_id,
                     "inventory": inventory,
                     "price": float(variant["price"]),
                     "source_hash": node["metafield"]["value"] if node["metafield"] else None
@@ -488,27 +492,55 @@ def update_inventory(updates: List[dict]) -> None:
     success = 0
     failed = 0
     
-    for update in updates:
-        try:
-            response = requests.post(
-                f"{REST_BASE}/inventory_levels/set.json",
-                headers=HEADERS,
-                json={
-                    "location_id": LOCATION_ID,
-                    "inventory_item_id": update["inventory_item_id"],
-                    "available": update["available"]
-                },
-                timeout=10
-            )
-            response.raise_for_status()
-            success += 1
-            
-            # Rate limiting
-            time.sleep(0.3)
-            
-        except Exception as e:
-            failed += 1
-            print(f"  ⚠️  Failed to update inventory for {update.get('sku', 'unknown')}: {e}")
+    for i, update in enumerate(updates):
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                response = requests.post(
+                    f"{REST_BASE}/inventory_levels/set.json",
+                    headers=HEADERS,
+                    json={
+                        "location_id": LOCATION_ID,
+                        "inventory_item_id": update["inventory_item_id"],
+                        "available": update["available"]
+                    },
+                    timeout=10
+                )
+                response.raise_for_status()
+                success += 1
+                
+                # Progress indicator every 50 items
+                if (i + 1) % 50 == 0:
+                    print(f"  Progress: {i + 1}/{len(updates)} ({success} successful, {failed} failed)")
+                
+                # Rate limiting - 2 calls per second
+                time.sleep(0.5)
+                break
+                
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 429:
+                    # Rate limit - exponential backoff
+                    retry_count += 1
+                    wait_time = 2 ** retry_count
+                    if retry_count < max_retries:
+                        print(f"  ⏳ Rate limited, waiting {wait_time}s before retry {retry_count}/{max_retries}")
+                        time.sleep(wait_time)
+                    else:
+                        failed += 1
+                        print(f"  ⚠️  Max retries reached for {update.get('sku', 'unknown')}")
+                        break
+                else:
+                    # Other HTTP error
+                    failed += 1
+                    print(f"  ⚠️  Failed to update inventory for {update.get('sku', 'unknown')}: {e.response.status_code}")
+                    break
+                    
+            except Exception as e:
+                failed += 1
+                print(f"  ⚠️  Failed to update inventory for {update.get('sku', 'unknown')}: {e}")
+                break
     
     print(f"✅ Inventory updates: {success} successful, {failed} failed")
 
