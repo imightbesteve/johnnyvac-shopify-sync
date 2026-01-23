@@ -1,0 +1,79 @@
+{
+  "VACUUM": "Vacuums & Extractors > Upright Vacuums",
+  "ASPIRATEUR": "Vacuums & Extractors > Upright Vacuums",
+  "UPRIGHT": "Vacuums & Extractors > Upright Vacuums",
+  "VERTICAL": "Vacuums & Extractors > Upright Vacuums",
+  
+  "CANISTER": "Vacuums & Extractors > Canister Vacuums",
+  "TRAINEAU": "Vacuums & Extractors > Canister Vacuums",
+  
+  "BACKPACK": "Vacuums & Extractors > Backpack Vacuums",
+  "SAC À DOS": "Vacuums & Extractors > Backpack Vacuums",
+  
+  "CENTRAL VAC": "Vacuums & Extractors > Central Vacuums",
+  "CENTRAL VACUUM": "Vacuums & Extractors > Central Vacuums",
+  "CENTRALE": "Vacuums & Extractors > Central Vacuums",
+  
+  "EXTRACTOR": "Vacuums & Extractors > Carpet Extractors",
+  "CARPET CLEANER": "Vacuums & Extractors > Carpet Extractors",
+  "EXTRACTEUR": "Vacuums & Extractors > Carpet Extractors",
+  
+  "SCRUBBER": "Floor Care > Auto Scrubbers",
+  "AUTO SCRUBBER": "Floor Care > Auto Scrubbers",
+  "AUTOLAVEUSE": "Floor Care > Auto Scrubbers",
+  
+  "BURNISHER": "Floor Care > Burnishers & Polishers",
+  "POLISHER": "Floor Care > Burnishers & Polishers",
+  "POLISSEUSE": "Floor Care > Burnishers & Polishers",
+  
+  "FLOOR MACHINE": "Floor Care > Floor Machines",
+  "ROTARY": "Floor Care > Floor Machines",
+  
+  "FLOOR PAD": "Floor Care > Floor Pads & Brushes",
+  "PAD": "Floor Care > Floor Pads & Brushes",
+  "TAMPON": "Floor Care > Floor Pads & Brushes",
+  
+  "BRUSH ROLL": "Parts & Accessories > Brushes & Brush Rolls",
+  "AGITATOR": "Parts & Accessories > Brushes & Brush Rolls",
+  "BRUSH": "Parts & Accessories > Brushes & Brush Rolls",
+  "BROSSE": "Parts & Accessories > Brushes & Brush Rolls",
+  
+  "FILTER": "Parts & Accessories > Filters",
+  "FILTRE": "Parts & Accessories > Filters",
+  "HEPA": "Parts & Accessories > Filters",
+  
+  "HOSE": "Parts & Accessories > Hoses & Tubes",
+  "TUBE": "Parts & Accessories > Hoses & Tubes",
+  "WAND": "Parts & Accessories > Hoses & Tubes",
+  "BOYAU": "Parts & Accessories > Hoses & Tubes",
+  
+  "BELT": "Parts & Accessories > Belts",
+  "COURROIE": "Parts & Accessories > Belts",
+  
+  "MOTOR": "Parts & Accessories > Motors & Electrical Parts",
+  "MOTEUR": "Parts & Accessories > Motors & Electrical Parts",
+  "SWITCH": "Parts & Accessories > Motors & Electrical Parts",
+  
+  "NOZZLE": "Parts & Accessories > Attachments & Nozzles",
+  "ATTACHMENT": "Parts & Accessories > Attachments & Nozzles",
+  "TOOL": "Parts & Accessories > Attachments & Nozzles",
+  "SUCEUR": "Parts & Accessories > Attachments & Nozzles",
+  "ACCESSOIRE": "Parts & Accessories > Attachments & Nozzles",
+  
+  "VACUUM BAG": "Consumables & Paper > Vacuum Bags",
+  "BAG": "Consumables & Paper > Vacuum Bags",
+  "SAC": "Consumables & Paper > Vacuum Bags",
+  
+  "TOILET PAPER": "Consumables & Paper > Paper Towels & Tissue",
+  "TISSUE": "Consumables & Paper > Paper Towels & Tissue",
+  "PAPER TOWEL": "Consumables & Paper > Paper Towels & Tissue",
+  "PAPIER": "Consumables & Paper > Paper Towels & Tissue",
+  
+  "DETERGENT": "Chemicals & Cleaning Solutions",
+  "CLEANER": "Chemicals & Cleaning Solutions",
+  "DEGREASER": "Chemicals & Cleaning Solutions",
+  "SANITIZER": "Chemicals & Cleaning Solutions",
+  "DISINFECTANT": "Chemicals & Cleaning Solutions",
+  "NETTOYANT": "Chemicals & Cleaning Solutions",
+  "DÉSINFECTANT": "Chemicals & Cleaning Solutions"
+}
