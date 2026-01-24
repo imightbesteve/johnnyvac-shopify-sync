@@ -5,9 +5,21 @@ JohnnyVac to Shopify Bulk Sync (Refactored)
 Uses category_map.json as single source of truth for categorization.
 Stateless, CI-compatible, GraphQL bulk operations with hash optimization.
 
+Classification System:
+    - Weighted keyword scoring with phrase matching
+    - Multi-word phrases (e.g., "vacuum filter") score higher than single words
+    - Title matches prioritized over description matches
+    - Specificity bonus for longer keywords
+
 Environment Variables:
     SHOPIFY_STORE: Store URL (e.g., kingsway-janitorial.myshopify.com)
     SHOPIFY_ACCESS_TOKEN: Admin API access token (shpat_...)
+    DEBUG_CLASSIFICATION: Set to 'true' to see classification scores (optional)
+
+Output:
+    - Sync statistics (created/updated/skipped/failed)
+    - Category distribution report
+    - Highlights products needing manual review
 """
 
 import os
@@ -38,6 +50,7 @@ RATE_LIMIT_DELAY = 1.0
 BATCH_DELAY = 10
 LANGUAGE = 'en'
 CATEGORY_MAP_FILE = 'category_map.json'
+DEBUG_CLASSIFICATION = os.environ.get('DEBUG_CLASSIFICATION', 'false').lower() == 'true'
 
 # Metafield namespace for hash tracking
 HASH_NAMESPACE = "kingsway"
@@ -68,16 +81,24 @@ def load_category_map() -> List[Dict]:
 
 def classify_product(title_en: str, title_fr: str, desc_en: str, desc_fr: str, categories: List[Dict]) -> str:
     """
-    Classify product into canonical productType using keyword matching.
+    Classify product into canonical productType using weighted keyword matching.
     Returns the productType with the highest score, or fallback category.
+    
+    Scoring system:
+    - Exact phrase match in title: 20 points (highest confidence)
+    - Single word match in title: 10 points
+    - Exact phrase match in description: 8 points
+    - Single word match in description: 3 points
+    - Longer keywords (more specific) get bonus multiplier
     """
-    title_en = title_en.lower()
-    title_fr = title_fr.lower()
-    desc_en = desc_en.lower()
-    desc_fr = desc_fr.lower()
+    title_en_lower = title_en.lower()
+    title_fr_lower = title_fr.lower()
+    desc_en_lower = desc_en.lower()
+    desc_fr_lower = desc_fr.lower()
     
     best_score = 0
     best_category = None
+    category_scores = {}  # For debug output
     
     for category in categories:
         # Skip the fallback category initially
@@ -85,29 +106,93 @@ def classify_product(title_en: str, title_fr: str, desc_en: str, desc_fr: str, c
             continue
         
         score = 0
+        matched_keywords = []  # For debug output
         
         # Check English keywords
         for keyword in category.get('keywords_en', []):
-            keyword = keyword.lower()
-            if keyword in title_en:
-                score += 10  # Title matches are weighted higher
-            if keyword in desc_en:
-                score += 3
+            keyword_lower = keyword.lower()
+            word_count = len(keyword_lower.split())
+            
+            # Longer phrases are more specific - apply multiplier
+            specificity_bonus = 1.0 + (word_count - 1) * 0.2  # 1.0, 1.2, 1.4, etc.
+            
+            # Title matches (highest priority)
+            if keyword_lower in title_en_lower:
+                if word_count > 1:
+                    # Multi-word phrase match in title = highest confidence
+                    points = int(20 * specificity_bonus)
+                    score += points
+                    if DEBUG_CLASSIFICATION:
+                        matched_keywords.append(f"{keyword} (title phrase: +{points})")
+                else:
+                    # Single word match in title
+                    score += 10
+                    if DEBUG_CLASSIFICATION:
+                        matched_keywords.append(f"{keyword} (title: +10)")
+            
+            # Description matches (lower priority)
+            elif keyword_lower in desc_en_lower:
+                if word_count > 1:
+                    # Multi-word phrase match in description
+                    points = int(8 * specificity_bonus)
+                    score += points
+                    if DEBUG_CLASSIFICATION:
+                        matched_keywords.append(f"{keyword} (desc phrase: +{points})")
+                else:
+                    # Single word match in description
+                    score += 3
+                    if DEBUG_CLASSIFICATION:
+                        matched_keywords.append(f"{keyword} (desc: +3)")
         
-        # Check French keywords
+        # Check French keywords (same logic)
         for keyword in category.get('keywords_fr', []):
-            keyword = keyword.lower()
-            if keyword in title_fr:
-                score += 10
-            if keyword in desc_fr:
-                score += 3
+            keyword_lower = keyword.lower()
+            word_count = len(keyword_lower.split())
+            specificity_bonus = 1.0 + (word_count - 1) * 0.2
+            
+            if keyword_lower in title_fr_lower:
+                if word_count > 1:
+                    points = int(20 * specificity_bonus)
+                    score += points
+                    if DEBUG_CLASSIFICATION:
+                        matched_keywords.append(f"{keyword} (FR title phrase: +{points})")
+                else:
+                    score += 10
+                    if DEBUG_CLASSIFICATION:
+                        matched_keywords.append(f"{keyword} (FR title: +10)")
+            
+            elif keyword_lower in desc_fr_lower:
+                if word_count > 1:
+                    points = int(8 * specificity_bonus)
+                    score += points
+                    if DEBUG_CLASSIFICATION:
+                        matched_keywords.append(f"{keyword} (FR desc phrase: +{points})")
+                else:
+                    score += 3
+                    if DEBUG_CLASSIFICATION:
+                        matched_keywords.append(f"{keyword} (FR desc: +3)")
+        
+        if score > 0:
+            category_scores[category['productType']] = {
+                'score': score,
+                'keywords': matched_keywords
+            }
         
         if score > best_score:
             best_score = score
             best_category = category['productType']
     
-    # Fallback if no matches
-    if best_category is None:
+    # Debug output
+    if DEBUG_CLASSIFICATION and category_scores:
+        log(f"   🔍 Classification scores for '{title_en[:40]}...':")
+        sorted_scores = sorted(category_scores.items(), key=lambda x: x[1]['score'], reverse=True)
+        for cat, info in sorted_scores[:3]:  # Show top 3
+            log(f"      {cat}: {info['score']} pts")
+            if info['keywords']:
+                log(f"         Matched: {', '.join(info['keywords'][:3])}")
+    
+    # Fallback if no matches (score = 0)
+    if best_category is None or best_score == 0:
         log(f"⚠️  No category match for: {title_en[:50]}... (using fallback)")
         return 'Other > Needs Review'
     
@@ -463,14 +548,21 @@ def sync_products(csv_products: List[Dict], existing_products: Dict[str, Dict]):
     skipped = 0
     failed = 0
     
+    # Track categorization stats
+    category_stats = {}
+    
     total = len(csv_products)
     
     for i, product_data in enumerate(csv_products, 1):
         sku = product_data['sku']
         product_hash = compute_product_hash(product_data)
+        product_type = product_data['product_type']
+        
+        # Track category distribution
+        category_stats[product_type] = category_stats.get(product_type, 0) + 1
         
         log(f"[{i}/{total}] Processing: {sku} - {product_data['title'][:50]}")
-        log(f"         Category: {product_data['product_type']}")
+        log(f"         Category: {product_type}")
         
         if sku in existing_products:
             # Product exists - check if update needed
@@ -513,6 +605,27 @@ def sync_products(csv_products: List[Dict], existing_products: Dict[str, Dict]):
     log(f"⏭️  Skipped:  {skipped}")
     log(f"❌ Failed:   {failed}")
     log(f"📊 Total:    {total}")
+    log("=" * 70)
+    
+    # Category distribution report
+    log("")
+    log("📊 CATEGORIZATION REPORT")
+    log("=" * 70)
+    
+    # Sort by count (descending)
+    sorted_cats = sorted(category_stats.items(), key=lambda x: x[1], reverse=True)
+    
+    for product_type, count in sorted_cats:
+        percentage = (count / total) * 100
+        log(f"{product_type}: {count} products ({percentage:.1f}%)")
+    
+    # Highlight needs review
+    needs_review = category_stats.get('Other > Needs Review', 0)
+    if needs_review > 0:
+        log("")
+        log(f"⚠️  {needs_review} products need manual review ({(needs_review/total)*100:.1f}%)")
+        log("   Check 'Other > Needs Review' collection after sync")
+    
     log("=" * 70)
 
 
