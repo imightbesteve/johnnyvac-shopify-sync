@@ -1,79 +1,270 @@
 {
-  "VACUUM": "Vacuums & Extractors > Upright Vacuums",
-  "ASPIRATEUR": "Vacuums & Extractors > Upright Vacuums",
-  "UPRIGHT": "Vacuums & Extractors > Upright Vacuums",
-  "VERTICAL": "Vacuums & Extractors > Upright Vacuums",
-  
-  "CANISTER": "Vacuums & Extractors > Canister Vacuums",
-  "TRAINEAU": "Vacuums & Extractors > Canister Vacuums",
-  
-  "BACKPACK": "Vacuums & Extractors > Backpack Vacuums",
-  "SAC À DOS": "Vacuums & Extractors > Backpack Vacuums",
-  
-  "CENTRAL VAC": "Vacuums & Extractors > Central Vacuums",
-  "CENTRAL VACUUM": "Vacuums & Extractors > Central Vacuums",
-  "CENTRALE": "Vacuums & Extractors > Central Vacuums",
-  
-  "EXTRACTOR": "Vacuums & Extractors > Carpet Extractors",
-  "CARPET CLEANER": "Vacuums & Extractors > Carpet Extractors",
-  "EXTRACTEUR": "Vacuums & Extractors > Carpet Extractors",
-  
-  "SCRUBBER": "Floor Care > Auto Scrubbers",
-  "AUTO SCRUBBER": "Floor Care > Auto Scrubbers",
-  "AUTOLAVEUSE": "Floor Care > Auto Scrubbers",
-  
-  "BURNISHER": "Floor Care > Burnishers & Polishers",
-  "POLISHER": "Floor Care > Burnishers & Polishers",
-  "POLISSEUSE": "Floor Care > Burnishers & Polishers",
-  
-  "FLOOR MACHINE": "Floor Care > Floor Machines",
-  "ROTARY": "Floor Care > Floor Machines",
-  
-  "FLOOR PAD": "Floor Care > Floor Pads & Brushes",
-  "PAD": "Floor Care > Floor Pads & Brushes",
-  "TAMPON": "Floor Care > Floor Pads & Brushes",
-  
-  "BRUSH ROLL": "Parts & Accessories > Brushes & Brush Rolls",
-  "AGITATOR": "Parts & Accessories > Brushes & Brush Rolls",
-  "BRUSH": "Parts & Accessories > Brushes & Brush Rolls",
-  "BROSSE": "Parts & Accessories > Brushes & Brush Rolls",
-  
-  "FILTER": "Parts & Accessories > Filters",
-  "FILTRE": "Parts & Accessories > Filters",
-  "HEPA": "Parts & Accessories > Filters",
-  
-  "HOSE": "Parts & Accessories > Hoses & Tubes",
-  "TUBE": "Parts & Accessories > Hoses & Tubes",
-  "WAND": "Parts & Accessories > Hoses & Tubes",
-  "BOYAU": "Parts & Accessories > Hoses & Tubes",
-  
-  "BELT": "Parts & Accessories > Belts",
-  "COURROIE": "Parts & Accessories > Belts",
-  
-  "MOTOR": "Parts & Accessories > Motors & Electrical Parts",
-  "MOTEUR": "Parts & Accessories > Motors & Electrical Parts",
-  "SWITCH": "Parts & Accessories > Motors & Electrical Parts",
-  
-  "NOZZLE": "Parts & Accessories > Attachments & Nozzles",
-  "ATTACHMENT": "Parts & Accessories > Attachments & Nozzles",
-  "TOOL": "Parts & Accessories > Attachments & Nozzles",
-  "SUCEUR": "Parts & Accessories > Attachments & Nozzles",
-  "ACCESSOIRE": "Parts & Accessories > Attachments & Nozzles",
-  
-  "VACUUM BAG": "Consumables & Paper > Vacuum Bags",
-  "BAG": "Consumables & Paper > Vacuum Bags",
-  "SAC": "Consumables & Paper > Vacuum Bags",
-  
-  "TOILET PAPER": "Consumables & Paper > Paper Towels & Tissue",
-  "TISSUE": "Consumables & Paper > Paper Towels & Tissue",
-  "PAPER TOWEL": "Consumables & Paper > Paper Towels & Tissue",
-  "PAPIER": "Consumables & Paper > Paper Towels & Tissue",
-  
-  "DETERGENT": "Chemicals & Cleaning Solutions",
-  "CLEANER": "Chemicals & Cleaning Solutions",
-  "DEGREASER": "Chemicals & Cleaning Solutions",
-  "SANITIZER": "Chemicals & Cleaning Solutions",
-  "DISINFECTANT": "Chemicals & Cleaning Solutions",
-  "NETTOYANT": "Chemicals & Cleaning Solutions",
-  "DÉSINFECTANT": "Chemicals & Cleaning Solutions"
+  "categories": [
+    {
+      "productType": "Vacuums & Extractors > Upright Vacuums",
+      "handle": "vacuums-extractors-upright-vacuums",
+      "keywords_en": ["upright", "commercial upright", "upright vacuum"],
+      "keywords_fr": ["verticale", "aspirateur vertical", "balayeuse verticale"],
+      "min_products": 5
+    },
+    {
+      "productType": "Vacuums & Extractors > Backpack Vacuums",
+      "handle": "vacuums-extractors-backpack-vacuums",
+      "keywords_en": ["backpack", "back pack", "backpack vacuum"],
+      "keywords_fr": ["sac à dos", "aspirateur dorsal"],
+      "min_products": 3
+    },
+    {
+      "productType": "Vacuums & Extractors > Canister Vacuums",
+      "handle": "vacuums-extractors-canister-vacuums",
+      "keywords_en": ["canister", "tank vacuum", "canister vacuum"],
+      "keywords_fr": ["traineau", "aspirateur traineau", "réservoir"],
+      "min_products": 3
+    },
+    {
+      "productType": "Vacuums & Extractors > Wet Dry Vacuums",
+      "handle": "vacuums-extractors-wet-dry-vacuums",
+      "keywords_en": ["wet dry", "wet/dry", "shop vac", "wet dry vacuum"],
+      "keywords_fr": ["eau et poussière", "sec et humide"],
+      "min_products": 5
+    },
+    {
+      "productType": "Vacuums & Extractors > Carpet Extractors",
+      "handle": "vacuums-extractors-carpet-extractors",
+      "keywords_en": ["extractor", "carpet extractor", "extraction", "carpet cleaning machine"],
+      "keywords_fr": ["extracteur", "extracteur de tapis", "nettoyeur de tapis"],
+      "min_products": 3
+    },
+    {
+      "productType": "Vacuums & Extractors > Floor Machines",
+      "handle": "vacuums-extractors-floor-machines",
+      "keywords_en": ["floor machine", "scrubber", "buffer", "burnisher", "polisher"],
+      "keywords_fr": ["polisseuse", "récureuse", "machine à plancher"],
+      "min_products": 3
+    },
+    {
+      "productType": "Vacuum Parts > Bags & Filters",
+      "handle": "vacuum-parts-bags-filters",
+      "keywords_en": ["vacuum bag", "filter", "hepa", "dust bag", "filtration"],
+      "keywords_fr": ["sac", "filtre", "sac d'aspirateur"],
+      "min_products": 10
+    },
+    {
+      "productType": "Vacuum Parts > Belts & Brushes",
+      "handle": "vacuum-parts-belts-brushes",
+      "keywords_en": ["belt", "brush roll", "agitator", "brush", "roller"],
+      "keywords_fr": ["courroie", "brosse", "rouleau"],
+      "min_products": 5
+    },
+    {
+      "productType": "Vacuum Parts > Hoses & Wands",
+      "handle": "vacuum-parts-hoses-wands",
+      "keywords_en": ["hose", "wand", "extension", "tube", "attachment"],
+      "keywords_fr": ["boyau", "tube", "rallonge"],
+      "min_products": 5
+    },
+    {
+      "productType": "Vacuum Parts > Motors & Components",
+      "handle": "vacuum-parts-motors-components",
+      "keywords_en": ["motor", "switch", "cord", "wheel", "part"],
+      "keywords_fr": ["moteur", "pièce", "composant", "interrupteur"],
+      "min_products": 5
+    },
+    {
+      "productType": "Cleaning Chemicals > Floor Cleaners",
+      "handle": "cleaning-chemicals-floor-cleaners",
+      "keywords_en": ["floor cleaner", "floor wash", "neutral cleaner", "tile cleaner"],
+      "keywords_fr": ["nettoyant plancher", "savon à plancher", "nettoyeur neutre"],
+      "min_products": 5
+    },
+    {
+      "productType": "Cleaning Chemicals > Degreasers",
+      "handle": "cleaning-chemicals-degreasers",
+      "keywords_en": ["degreaser", "heavy duty cleaner", "grease remover"],
+      "keywords_fr": ["dégraisseur", "dégraissant", "nettoyant industriel"],
+      "min_products": 3
+    },
+    {
+      "productType": "Cleaning Chemicals > Disinfectants",
+      "handle": "cleaning-chemicals-disinfectants",
+      "keywords_en": ["disinfectant", "sanitizer", "antibacterial", "germicidal"],
+      "keywords_fr": ["désinfectant", "assainissant", "antibactérien"],
+      "min_products": 5
+    },
+    {
+      "productType": "Cleaning Chemicals > All-Purpose Cleaners",
+      "handle": "cleaning-chemicals-all-purpose-cleaners",
+      "keywords_en": ["all-purpose", "multi-purpose", "all purpose cleaner", "general cleaner"],
+      "keywords_fr": ["tout usage", "multi-usage", "nettoyant général"],
+      "min_products": 5
+    },
+    {
+      "productType": "Cleaning Chemicals > Glass Cleaners",
+      "handle": "cleaning-chemicals-glass-cleaners",
+      "keywords_en": ["glass cleaner", "window cleaner", "glass polish"],
+      "keywords_fr": ["nettoyant vitre", "lave vitre", "nettoyant à verre"],
+      "min_products": 3
+    },
+    {
+      "productType": "Cleaning Chemicals > Carpet & Upholstery",
+      "handle": "cleaning-chemicals-carpet-upholstery",
+      "keywords_en": ["carpet cleaner", "upholstery", "fabric", "shampoo", "spot remover"],
+      "keywords_fr": ["nettoyant tapis", "shampooing", "tissu"],
+      "min_products": 5
+    },
+    {
+      "productType": "Cleaning Chemicals > Specialty Chemicals",
+      "handle": "cleaning-chemicals-specialty-chemicals",
+      "keywords_en": ["stripper", "sealer", "odor", "descaler", "restroom cleaner"],
+      "keywords_fr": ["décapant", "scellant", "détartrant", "nettoyant toilette"],
+      "min_products": 3
+    },
+    {
+      "productType": "Paper Products > Paper Towels",
+      "handle": "paper-products-paper-towels",
+      "keywords_en": ["paper towel", "hand towel", "roll towel", "multifold"],
+      "keywords_fr": ["essuie-tout", "essuie-main", "papier main"],
+      "min_products": 5
+    },
+    {
+      "productType": "Paper Products > Toilet Paper",
+      "handle": "paper-products-toilet-paper",
+      "keywords_en": ["toilet paper", "bathroom tissue", "toilet tissue"],
+      "keywords_fr": ["papier toilette", "papier hygiénique"],
+      "min_products": 5
+    },
+    {
+      "productType": "Paper Products > Tissues & Napkins",
+      "handle": "paper-products-tissues-napkins",
+      "keywords_en": ["tissue", "facial tissue", "napkin", "serviette"],
+      "keywords_fr": ["mouchoir", "papier mouchoir", "serviette"],
+      "min_products": 3
+    },
+    {
+      "productType": "Paper Products > Dispensers",
+      "handle": "paper-products-dispensers",
+      "keywords_en": ["dispenser", "towel dispenser", "tissue dispenser"],
+      "keywords_fr": ["distributeur", "distributrice"],
+      "min_products": 3
+    },
+    {
+      "productType": "Cleaning Equipment > Mops & Buckets",
+      "handle": "cleaning-equipment-mops-buckets",
+      "keywords_en": ["mop", "bucket", "wringer", "mop head", "microfiber mop"],
+      "keywords_fr": ["vadrouille", "moppe", "seau", "chaudière"],
+      "min_products": 5
+    },
+    {
+      "productType": "Cleaning Equipment > Brooms & Brushes",
+      "handle": "cleaning-equipment-brooms-brushes",
+      "keywords_en": ["broom", "brush", "sweep", "dustpan", "lobby broom"],
+      "keywords_fr": ["balai", "brosse", "porte-poussière"],
+      "min_products": 5
+    },
+    {
+      "productType": "Cleaning Equipment > Squeegees",
+      "handle": "cleaning-equipment-squeegees",
+      "keywords_en": ["squeegee", "window squeegee", "floor squeegee"],
+      "keywords_fr": ["raclette", "racloir"],
+      "min_products": 3
+    },
+    {
+      "productType": "Cleaning Equipment > Carts & Caddies",
+      "handle": "cleaning-equipment-carts-caddies",
+      "keywords_en": ["cart", "caddy", "janitor cart", "cleaning cart", "trolley"],
+      "keywords_fr": ["chariot", "panier"],
+      "min_products": 3
+    },
+    {
+      "productType": "Floor Care > Floor Pads",
+      "handle": "floor-care-floor-pads",
+      "keywords_en": ["floor pad", "buffing pad", "scrubbing pad", "polishing pad"],
+      "keywords_fr": ["pad", "tampon", "disque"],
+      "min_products": 5
+    },
+    {
+      "productType": "Floor Care > Floor Finish & Wax",
+      "handle": "floor-care-floor-finish-wax",
+      "keywords_en": ["floor finish", "floor wax", "sealer", "coating"],
+      "keywords_fr": ["cire", "fini", "scellant"],
+      "min_products": 3
+    },
+    {
+      "productType": "Floor Care > Strippers & Removers",
+      "handle": "floor-care-strippers-removers",
+      "keywords_en": ["stripper", "floor stripper", "wax remover"],
+      "keywords_fr": ["décapant", "décireur"],
+      "min_products": 3
+    },
+    {
+      "productType": "Waste Management > Trash Bags",
+      "handle": "waste-management-trash-bags",
+      "keywords_en": ["trash bag", "garbage bag", "waste bag", "liner"],
+      "keywords_fr": ["sac poubelle", "sac déchet"],
+      "min_products": 5
+    },
+    {
+      "productType": "Waste Management > Trash Cans & Bins",
+      "handle": "waste-management-trash-cans-bins",
+      "keywords_en": ["trash can", "garbage can", "waste bin", "recycling bin"],
+      "keywords_fr": ["poubelle", "bac", "conteneur"],
+      "min_products": 3
+    },
+    {
+      "productType": "Safety & Protection > Gloves",
+      "handle": "safety-protection-gloves",
+      "keywords_en": ["glove", "latex", "nitrile", "vinyl", "disposable glove"],
+      "keywords_fr": ["gant", "gants latex", "gants nitrile"],
+      "min_products": 5
+    },
+    {
+      "productType": "Safety & Protection > Masks & Protection",
+      "handle": "safety-protection-masks-protection",
+      "keywords_en": ["mask", "respirator", "safety glasses", "protection"],
+      "keywords_fr": ["masque", "respirateur", "lunette", "protection"],
+      "min_products": 3
+    },
+    {
+      "productType": "Safety & Protection > Spill Kits",
+      "handle": "safety-protection-spill-kits",
+      "keywords_en": ["spill kit", "absorbent", "cleanup"],
+      "keywords_fr": ["trousse déversement", "absorbant"],
+      "min_products": 2
+    },
+    {
+      "productType": "Restroom Supplies > Hand Soap",
+      "handle": "restroom-supplies-hand-soap",
+      "keywords_en": ["hand soap", "soap", "hand wash", "foam soap"],
+      "keywords_fr": ["savon", "savon main", "savon mousse"],
+      "min_products": 5
+    },
+    {
+      "productType": "Restroom Supplies > Hand Sanitizer",
+      "handle": "restroom-supplies-hand-sanitizer",
+      "keywords_en": ["hand sanitizer", "sanitizer", "alcohol gel"],
+      "keywords_fr": ["désinfectant main", "gel main"],
+      "min_products": 3
+    },
+    {
+      "productType": "Restroom Supplies > Air Fresheners",
+      "handle": "restroom-supplies-air-fresheners",
+      "keywords_en": ["air freshener", "deodorizer", "fragrance", "odor control"],
+      "keywords_fr": ["désodorisant", "assainisseur", "parfum"],
+      "min_products": 3
+    },
+    {
+      "productType": "Restroom Supplies > Dispensers & Accessories",
+      "handle": "restroom-supplies-dispensers-accessories",
+      "keywords_en": ["soap dispenser", "restroom dispenser", "hand dryer"],
+      "keywords_fr": ["distributeur savon", "sèche-main"],
+      "min_products": 3
+    },
+    {
+      "productType": "Other > Needs Review",
+      "handle": "other-needs-review",
+      "keywords_en": [],
+      "keywords_fr": [],
+      "min_products": 1
+    }
+  ]
 }
