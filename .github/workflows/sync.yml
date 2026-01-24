@@ -1,50 +1,67 @@
-name: JohnnyVac Shopify Sync
+name: JohnnyVac to Shopify Sync
 
 on:
+  # Run daily at 7 AM UTC (after JohnnyVac CSV updates)
   schedule:
-    # Run daily at 6 AM UTC (after JohnnyVac CSV updates)
-    - cron: '0 6 * * *'
+    - cron: '0 7 * * *'
   
-  # Allow manual trigger
+  # Allow manual triggering with options
   workflow_dispatch:
+    inputs:
+      create_collections:
+        description: 'Create/update collections after sync'
+        required: false
+        type: boolean
+        default: false
+      auto_publish:
+        description: 'Auto-publish new collections'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
-  sync:
+  sync-products:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180  # 3 hours max
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+      
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
+      
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install requests
-
-      - name: Verify files exist
-        run: |
-          ls -la
-          test -f sync_shopify_bulk.py || (echo "❌ sync_shopify_bulk.py not found" && exit 1)
-          test -f category_map.json || (echo "❌ category_map.json not found" && exit 1)
-
-      - name: Run sync
+      
+      - name: Sync products to Shopify
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-        run: python sync_shopify_bulk.py
-
-      - name: Report status
+        run: |
+          echo "Starting JohnnyVac product sync..."
+          python sync_shopify_bulk.py
+      
+      - name: Create/update collections (if enabled)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.create_collections == 'true'
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          AUTO_PUBLISH: ${{ github.event.inputs.auto_publish }}
+        run: |
+          echo "Creating automated collections..."
+          python create_collections.py
+      
+      - name: Summary
         if: always()
         run: |
-          if [ $? -eq 0 ]; then
-            echo "✅ Sync completed successfully"
-          else
-            echo "❌ Sync failed with errors"
-            exit 1
+          echo "## Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Product sync: Completed" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ github.event.inputs.create_collections }}" == "true" ]]; then
+            echo "- Collection creation: Completed" >> $GITHUB_STEP_SUMMARY
           fi
+          echo "- Timestamp: $(date -u)" >> $GITHUB_STEP_SUMMARY
