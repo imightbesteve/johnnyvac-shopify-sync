@@ -40,10 +40,10 @@ jobs:
 
       - name: Validate category map
         run: |
-          echo "Validating category_map.json..."
+          echo "Validating category_map_v3.json..."
           python - <<EOF
           import json
-          with open("category_map.json", "r", encoding="utf-8") as f:
+          with open("category_map_v3.json", "r", encoding="utf-8") as f:
               data = json.load(f)
           assert "categories" in data, "Missing 'categories' key"
           print(f"Loaded {len(data['categories'])} categories successfully")
