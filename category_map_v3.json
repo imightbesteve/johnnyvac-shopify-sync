@@ -1,0 +1,358 @@
+{
+  "settings": {
+    "description": "Category map v3 — priority-driven, part-first. Use with ProductCategorizer v3.",
+    "global_part_keywords": [
+      "pump", "regulator", "shurflo", "oring", "o-ring", "cuff", "elbow", "assembly", "assy",
+      "motor", "cord", "plug", "pigtail", "terminal", "pcb", "circuit", "relay", "plate", "housing",
+      "bumper", "inlet", "outlet", "valve", "adapter", "adaptor", "coupling", "repair kit",
+      "conversion kit", "service kit", "filter", "hepa", "belt", "bearing", "spring", "wheel",
+      "caster", "switch", "handle", "cover", "seal", "gasket", "brush", "agitator", "nozzle", "hose",
+      "kit", "bag", "sac", "assembly complete"
+    ],
+    "notes": [
+      "Apply global_part_keywords as a pre-check before category loop (priority short-circuit).",
+      "SKU / model noise (e.g. simpli_B224-0500, JV202) should be stripped by classification code before matching."
+    ]
+  },
+
+  "categories": [
+
+    {
+      "productType": "Parts & Replacement Parts > General Parts",
+      "handle": "parts-general",
+      "title": "Parts & Replacement Parts",
+      "priority": 100,
+      "keywords_en": ["part", "replacement", "service part", "spare", "component"],
+      "keywords_fr": ["pièce", "rechange", "pièce de rechange"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Motors & Electrical",
+      "handle": "parts-motors-electrical",
+      "title": "Motors & Electrical Parts",
+      "priority": 100,
+      "keywords_en": [
+        "motor", "motor cord", "motor cover", "electric motor", "cord", "power cord",
+        "plug", "pigtail", "wire", "terminal", "electric cord", "pcb", "pc board", "circuit", "relay",
+        "switch", "reset", "sensor", "controller"
+      ],
+      "keywords_fr": [
+        "moteur", "cordon", "prise", "fil électrique", "carte", "circuit", "relais", "interrupteur"
+      ],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Pumps & Regulators",
+      "handle": "parts-pumps-regulators",
+      "title": "Pumps & Regulators",
+      "priority": 100,
+      "keywords_en": ["pump", "shurflo", "pressure pump", "regulator", "psi", "bypass", "diaphragm pump"],
+      "keywords_fr": ["pompe", "régulateur", "pression"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Hoses & Fittings",
+      "handle": "parts-hoses-fittings",
+      "title": "Hoses & Fittings",
+      "priority": 100,
+      "keywords_en": ["hose", "vacuum hose", "boyau", "cuff", "hose cuff", "elbow", "fitting", "adapter", "coupling", "hose repair", "hose kit"],
+      "keywords_fr": ["boyau", "tuyau", "coude", "adaptateur", "raccord"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Filters",
+      "handle": "parts-filters",
+      "title": "Filters & Filtration",
+      "priority": 100,
+      "keywords_en": ["filter", "hepa", "filtration", "filter bag", "cartridge filter", "dacron", "gortex", "sms"],
+      "keywords_fr": ["filtre", "hepa", "cartouche", "dacron", "gortex"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Vacuum Bags",
+      "handle": "parts-vacuum-bags",
+      "title": "Vacuum Bags",
+      "priority": 100,
+      "keywords_en": ["vacuum bag", "cloth bag", "dust bag", "sac", "bag hepa", "bag cloth"],
+      "keywords_fr": ["sac", "sac d'aspirateur", "sac tissu"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Vacuum Belts",
+      "handle": "parts-vacuum-belts",
+      "title": "Belts & Drive Belts",
+      "priority": 100,
+      "keywords_en": ["belt", "drive belt", "v-belt", "agitator belt", "replacement belt"],
+      "keywords_fr": ["courroie"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Seals & Gaskets",
+      "handle": "parts-seals-gaskets",
+      "title": "Seals & Gaskets",
+      "priority": 100,
+      "keywords_en": ["seal", "gasket", "o-ring", "oring", "grommet"],
+      "keywords_fr": ["joint", "joints", "o-ring"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Assemblies & Housings",
+      "handle": "parts-assemblies-housings",
+      "title": "Assemblies & Housings",
+      "priority": 95,
+      "keywords_en": ["assembly", "assy", "assembly complete", "housing", "cover", "body", "panel", "chassis", "carriage", "handle"],
+      "keywords_fr": ["assemblage", "boîtier", "couvercle"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Repair & Conversion Kits",
+      "handle": "parts-repair-conversion-kits",
+      "title": "Repair & Conversion Kits",
+      "priority": 95,
+      "keywords_en": ["repair kit", "conversion kit", "service kit", "repair", "kit"],
+      "keywords_fr": ["trousse réparation", "kit réparation"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Parts & Replacement Parts > Wheels & Casters",
+      "handle": "parts-wheels-casters",
+      "title": "Wheels & Casters",
+      "priority": 95,
+      "keywords_en": ["wheel", "caster", "bearing", "axle", "roller"],
+      "keywords_fr": ["roue", "roulette", "palier"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Tools & Accessories > Cleaning Tools",
+      "handle": "tools-cleaning-tools",
+      "title": "Cleaning Tools",
+      "priority": 70,
+      "keywords_en": ["scraper", "squeegee", "sponge", "hand brush", "scrub brush", "microfiber cloth"],
+      "keywords_fr": ["grattoir", "raclette", "éponge", "brosse à main"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 5
+    },
+
+    {
+      "productType": "Tools & Accessories > Brooms & Brushes",
+      "handle": "tools-brooms-brushes",
+      "title": "Brooms & Brushes",
+      "priority": 70,
+      "keywords_en": ["broom", "push broom", "lobby broom", "dustpan", "brush roll"],
+      "keywords_fr": ["balai", "brosse", "porte-poussière"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 5
+    },
+
+    {
+      "productType": "Tools & Accessories > Mops & Buckets",
+      "handle": "tools-mops-buckets",
+      "title": "Mops & Buckets",
+      "priority": 70,
+      "keywords_en": ["mop", "wringer", "bucket", "mop head", "microfiber mop"],
+      "keywords_fr": ["vadrouille", "seau", "essoreuse"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 5
+    },
+
+    {
+      "productType": "Tools & Accessories > Dispensers",
+      "handle": "tools-dispensers",
+      "title": "Dispensers",
+      "priority": 65,
+      "keywords_en": ["dispenser", "soap dispenser", "towel dispenser", "wipe dispenser"],
+      "keywords_fr": ["distributeur", "distributeur de savon", "distributeur d'essuie-mains"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 3
+    },
+
+    {
+      "productType": "Consumables > Chemicals & Solutions",
+      "handle": "consumables-chemicals-solutions",
+      "title": "Chemicals & Cleaning Solutions",
+      "priority": 80,
+      "keywords_en": [
+        "cleaner", "chemical", "solution", "detergent", "degreaser", "disinfectant", "sanitizer",
+        "stripper", "finish", "neutral cleaner", "carpet shampoo", "upholstery cleaner", "deodorizer"
+      ],
+      "keywords_fr": ["nettoyant", "chimique", "dégraissant", "désinfectant", "détergent"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 20
+    },
+
+    {
+      "productType": "Consumables > Paper Products",
+      "handle": "consumables-paper-products",
+      "title": "Paper Products",
+      "priority": 80,
+      "keywords_en": ["paper towel", "toilet paper", "tissue", "napkin", "hand towel", "roll towel"],
+      "keywords_fr": ["papier", "essuie-tout", "papier toilette"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 10
+    },
+
+    {
+      "productType": "Consumables > Floor Pads",
+      "handle": "consumables-floor-pads",
+      "title": "Floor Pads & Accessories",
+      "priority": 75,
+      "keywords_en": ["floor pad", "buffing pad", "scrubbing pad", "stripping pad", "polishing pad", "microfiber pad"],
+      "keywords_fr": ["pad", "tampon", "disque"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 5
+    },
+
+    {
+      "productType": "Equipment & Machines > Commercial Vacuums",
+      "handle": "equipment-commercial-vacuums",
+      "title": "Commercial Vacuums",
+      "priority": 50,
+      "keywords_en": ["upright vacuum", "backpack vacuum", "canister vacuum", "wet dry vacuum"],
+      "keywords_fr": ["aspirateur vertical", "aspirateur sac à dos", "aspirateur traîneau"],
+      "exclusions_en": [
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", "replacement"
+      ],
+      "exclusions_fr": [
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", "prise", "remplacement"
+      ],
+      "min_products": 5
+    },
+
+    {
+      "productType": "Equipment & Machines > Floor Machines",
+      "handle": "equipment-floor-machines",
+      "title": "Floor Machines",
+      "priority": 50,
+      "keywords_en": ["floor machine", "burnisher", "polisher", "rotary machine"],
+      "keywords_fr": ["polisseuse", "machine à plancher"],
+      "exclusions_en": ["pad", "filter", "belt", "assembly", "assy", "repair kit", "brush", "brush strip"],
+      "exclusions_fr": ["tampon", "filtre", "courroie"],
+      "min_products": 3
+    },
+
+    {
+      "productType": "Equipment & Machines > Automatic Scrubbers",
+      "handle": "equipment-automatic-scrubbers",
+      "title": "Automatic Scrubbers",
+      "priority": 50,
+      "keywords_en": ["automatic scrubber", "auto scrubber", "walk behind scrubber", "ride on scrubber"],
+      "keywords_fr": ["autolaveuse", "récureuse automatique"],
+      "exclusions_en": ["brush", "pad", "hose", "filter", "motor", "belt", "assembly"],
+      "exclusions_fr": ["brosse", "pad", "boyau"],
+      "min_products": 3
+    },
+
+    {
+      "productType": "Equipment & Machines > Carpet Extractors",
+      "handle": "equipment-carpet-extractors",
+      "title": "Carpet Extractors",
+      "priority": 50,
+      "keywords_en": ["carpet extractor", "carpet extraction machine"],
+      "keywords_fr": ["extracteur de tapis", "nettoyeur de tapis"],
+      "exclusions_en": ["belt", "filter", "hose", "assembly", "bag"],
+      "exclusions_fr": ["courroie", "filtre", "boyau"],
+      "min_products": 3
+    },
+
+    {
+      "productType": "Equipment & Machines > Central Vacuums",
+      "handle": "equipment-central-vacuums",
+      "title": "Central Vacuums",
+      "priority": 50,
+      "keywords_en": ["central vacuum", "built-in vacuum", "central vac system"],
+      "keywords_fr": ["aspirateur central", "balayeuse centrale"],
+      "exclusions_en": ["hose", "filter", "bag", "assembly", "wall inlet", "kit"],
+      "exclusions_fr": ["boyau", "filtre", "sac"],
+      "min_products": 2
+    },
+
+    {
+      "productType": "Equipment & Machines > Pressure Washers",
+      "handle": "equipment-pressure-washers",
+      "title": "Pressure Washers",
+      "priority": 50,
+      "keywords_en": ["pressure washer", "power washer"],
+      "keywords_fr": ["nettoyeur haute pression"],
+      "exclusions_en": ["hose", "nozzle", "pump repair", "valve", "adapter"],
+      "exclusions_fr": ["boyau", "buse", "pompe"],
+      "min_products": 2
+    },
+
+    {
+      "productType": "Ops & Safety > Gloves",
+      "handle": "ops-gloves",
+      "title": "Gloves",
+      "priority": 60,
+      "keywords_en": ["glove", "nitrile", "latex", "vinyl", "disposable glove"],
+      "keywords_fr": ["gant"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 5
+    },
+
+    {
+      "productType": "Ops & Safety > Safety & PPE",
+      "handle": "ops-safety-ppe",
+      "title": "Safety & PPE",
+      "priority": 60,
+      "keywords_en": ["mask", "respirator", "safety glasses", "ppe", "floor sign", "spill kit"],
+      "keywords_fr": ["masque", "protection"],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 5
+    },
+
+    {
+      "productType": "Other > Needs Review",
+      "handle": "needs-review",
+      "title": "Needs Review",
+      "priority": 0,
+      "keywords_en": [],
+      "keywords_fr": [],
+      "exclusions_en": [],
+      "exclusions_fr": [],
+      "min_products": 1
+    }
+
+  ]
+}
