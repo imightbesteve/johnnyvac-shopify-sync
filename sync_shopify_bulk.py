@@ -15,7 +15,6 @@ import json
 import time
 import hashlib
 import asyncio
-import aiohttp
 import requests
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
