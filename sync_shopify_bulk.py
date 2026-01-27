@@ -479,7 +479,7 @@ def main():
     
     # Step 1: Initialize categorizer
     log("\n[1/7] Initializing categorization system...")
-    categorizer = ProductCategorizer('category_map_v3_fixed.json')
+    categorizer = ProductCategorizer('category_map_v3.json')
     
     # Step 2: Fetch CSV data
     log("\n[2/7] Fetching CSV data...")
