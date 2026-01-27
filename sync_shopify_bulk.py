@@ -3,7 +3,7 @@
 """
 JohnnyVac to Shopify Sync Script v2.0 (updated to use categorizer_v3 + category_map_v3)
 """
-
+import re
 import os
 import csv
 import json
