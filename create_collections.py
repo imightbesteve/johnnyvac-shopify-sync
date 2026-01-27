@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-JohnnyVac to Shopify - Automated Collection Creator (Refactored)
+JohnnyVac to Shopify - Automated Collection Creator v2
 
-Creates smart collections based on category_map.json taxonomy.
+Creates smart collections based on category_map_v4.json taxonomy.
 Stateless, CI-compatible, fully idempotent.
 
 Environment Variables:
@@ -17,12 +17,13 @@ import json
 import requests
 import time
 from typing import Dict, List, Optional
+from datetime import datetime
 
 # Configuration
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', '')
 SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 AUTO_PUBLISH = os.environ.get('AUTO_PUBLISH', 'false').lower() == 'true'
-CATEGORY_MAP_FILE = 'category_map_v3.json'
+CATEGORY_MAP_FILE = 'category_map_v4.json'
 
 GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json"
 REST_BASE_URL = f"https://{SHOPIFY_STORE}/admin/api/2024-01"
@@ -37,18 +38,24 @@ RATE_LIMIT_DELAY = 0.5
 
 def log(msg: str):
     """Simple logging with timestamp"""
-    from datetime import datetime
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
 def load_category_map() -> List[Dict]:
-    """Load category taxonomy from category_map.json"""
+    """Load category taxonomy from category_map_v4.json"""
     try:
         with open(CATEGORY_MAP_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             categories = data.get('categories', [])
-            log(f"✅ Loaded {len(categories)} categories from {CATEGORY_MAP_FILE}")
-            return categories
+            
+            # Filter out fallback categories (priority <= 10)
+            active_categories = [
+                c for c in categories 
+                if c.get('priority', 0) > 10
+            ]
+            
+            log(f"✅ Loaded {len(active_categories)} active categories from {CATEGORY_MAP_FILE}")
+            return active_categories
     except FileNotFoundError:
         log(f"❌ Error: {CATEGORY_MAP_FILE} not found")
         sys.exit(1)
@@ -146,7 +153,12 @@ def collection_exists_by_handle(handle: str) -> Optional[Dict]:
         return None
 
 
-def create_automated_collection(title: str, handle: str, product_type: str, description: str = None) -> Optional[Dict]:
+def create_automated_collection(
+    title: str, 
+    handle: str, 
+    product_type: str, 
+    description: str = None
+) -> Optional[Dict]:
     """Create an automated collection with productType rule"""
     mutation = '''
     mutation CollectionCreate($input: CollectionInput!) {
@@ -172,11 +184,20 @@ def create_automated_collection(title: str, handle: str, product_type: str, desc
     }
     '''
     
+    # Create a nice description
+    if not description:
+        # Parse the category path for a nicer description
+        parts = product_type.split(' > ')
+        if len(parts) > 1:
+            description = f"<p>Browse our selection of {parts[-1].lower()}.</p>"
+        else:
+            description = f"<p>All products in the {title} category.</p>"
+    
     variables = {
         "input": {
             "title": title,
             "handle": handle,
-            "descriptionHtml": description or f"<p>All products in the {title} category.</p>",
+            "descriptionHtml": description,
             "ruleSet": {
                 "appliedDisjunctively": False,
                 "rules": [
@@ -220,7 +241,6 @@ def publish_collection(collection_gid: str) -> bool:
     url = f"{REST_BASE_URL}/collections/{collection_id}.json"
     
     try:
-        # Update collection to published
         payload = {
             "collection": {
                 "id": int(collection_id),
@@ -258,7 +278,7 @@ def create_collections(categories: List[Dict], product_counts: Dict[str, int]):
     for category in categories:
         product_type = category['productType']
         handle = category['handle']
-        title = product_type  # Use productType as collection title
+        title = category.get('title', product_type.split(' > ')[-1])
         min_products = category.get('min_products', 1)
         
         # Get actual product count
@@ -309,11 +329,11 @@ def create_collections(categories: List[Dict], product_counts: Dict[str, int]):
     log("=" * 70)
     log("SUMMARY")
     log("=" * 70)
-    log(f"✅ Created:           {created}")
-    log(f"⏭️  Skipped (exists):   {skipped_exists}")
+    log(f"✅ Created:             {created}")
+    log(f"⏭️  Skipped (exists):    {skipped_exists}")
     log(f"⏭️  Skipped (threshold): {skipped_threshold}")
-    log(f"❌ Failed:            {failed}")
-    log(f"📊 Total categories:  {len(categories)}")
+    log(f"❌ Failed:              {failed}")
+    log(f"📊 Total categories:    {len(categories)}")
     log("=" * 70)
     
     if created > 0 and not AUTO_PUBLISH:
@@ -324,7 +344,7 @@ def create_collections(categories: List[Dict], product_counts: Dict[str, int]):
 
 def main():
     log("=" * 70)
-    log("JohnnyVac Automated Collection Creator (Refactored)")
+    log("JohnnyVac Automated Collection Creator v2")
     log("=" * 70)
     log("")
     
