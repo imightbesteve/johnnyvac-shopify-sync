@@ -8,6 +8,11 @@ on:
   # Allow manual triggering with options
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: 'Dry run (no changes made)'
+        required: false
+        type: boolean
+        default: false
       create_collections:
         description: 'Create/update collections after sync'
         required: false
@@ -18,6 +23,11 @@ on:
         required: false
         type: boolean
         default: false
+      archive_missing:
+        description: 'Archive products missing from CSV (set to DRAFT)'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   sync-products:
@@ -38,24 +48,58 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Validate category map
+      - name: Validate configuration files
         run: |
-          echo "Validating category_map_v3.json..."
+          echo "Validating category_map_v4.json..."
           python - <<EOF
           import json
-          with open("category_map_v3.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-          assert "categories" in data, "Missing 'categories' key"
-          print(f"Loaded {len(data['categories'])} categories successfully")
+          import sys
+          
+          try:
+              with open("category_map_v4.json", "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              
+              assert "settings" in data, "Missing 'settings' key"
+              assert "categories" in data, "Missing 'categories' key"
+              assert "jv_category_mappings" in data, "Missing 'jv_category_mappings' key"
+              
+              print(f"✅ Loaded {len(data['categories'])} categories")
+              print(f"✅ Loaded {len(data['jv_category_mappings'])} JV category mappings")
+              print(f"✅ Configuration valid")
+              
+          except Exception as e:
+              print(f"❌ Validation failed: {e}")
+              sys.exit(1)
           EOF
 
-      - name: Sync products to Shopify (GraphQL bulk)
+      - name: Sync products to Shopify
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          ARCHIVE_MISSING: ${{ github.event.inputs.archive_missing || 'true' }}
         run: |
-          echo "Starting JohnnyVac bulk product sync..."
-          python sync_shopify_bulk.py
+          echo "Starting JohnnyVac product sync..."
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "🔸 DRY RUN MODE - No changes will be made"
+          fi
+          python sync_shopify_v2.py
+
+      - name: Upload needs_review.csv artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: needs-review-report
+          path: needs_review.csv
+          if-no-files-found: ignore
+
+      - name: Upload skipped_products.csv artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skipped-products-report
+          path: skipped_products.csv
+          if-no-files-found: ignore
 
       - name: Create/update automated collections (optional)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.create_collections == 'true'
@@ -73,6 +117,11 @@ jobs:
           {
             echo "## JohnnyVac → Shopify Sync Summary"
             echo ""
+            echo "### Run Configuration"
+            echo "- 🔄 Dry run: ${{ github.event.inputs.dry_run || 'false' }}"
+            echo "- 🗑️ Archive missing: ${{ github.event.inputs.archive_missing || 'true' }}"
+            echo ""
+            echo "### Results"
             echo "- 🧹 Product sync: Completed"
             if [[ "${{ github.event.inputs.create_collections }}" == "true" ]]; then
               echo "- 🗂️ Collections: Created / Updated"
@@ -80,5 +129,11 @@ jobs:
             else
               echo "- 🗂️ Collections: Skipped"
             fi
-            echo "- ⏰ Timestamp (UTC): $(date -u)"
+            echo ""
+            echo "### Reports"
+            echo "- 📄 needs_review.csv: Products that couldn't be auto-categorized"
+            echo "- 📄 skipped_products.csv: Placeholder products that were skipped"
+            echo ""
+            echo "### Timestamp"
+            echo "- ⏰ UTC: $(date -u)"
           } >> $GITHUB_STEP_SUMMARY
