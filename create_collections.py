@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', '')
 SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 AUTO_PUBLISH = os.environ.get('AUTO_PUBLISH', 'false').lower() == 'true'
-CATEGORY_MAP_FILE = 'category_map.json'
+CATEGORY_MAP_FILE = 'category_map_v3.json'
 
 GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json"
 REST_BASE_URL = f"https://{SHOPIFY_STORE}/admin/api/2024-01"
