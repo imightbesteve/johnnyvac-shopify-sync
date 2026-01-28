@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # sync_shopify_v3.py
 """
-JohnnyVac to Shopify Sync v3.1 - HYBRID APPROACH
+JohnnyVac to Shopify Sync v3.2 - SMART HYBRID
 
-- Uses Bulk Query API to fetch existing products (fast!)
-- Uses batched individual mutations for creates/updates (reliable)
-- Much faster than v2 because bulk fetch saves ~2 hours
+Uses Shopify API 2026-01 with smart fallback:
+1. Bulk Query for fetching existing products (fast!)
+2. Tries Bulk Mutation first for creates/updates (fastest)
+3. Falls back to batched individual mutations if bulk fails
 
-Expected time: 30-45 minutes for full sync (vs 3+ hours in v2)
+Expected time:
+- If bulk works: ~15-20 minutes
+- If fallback needed: ~45-60 minutes
 """
 
 import os
@@ -37,7 +40,7 @@ DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 ARCHIVE_MISSING = os.environ.get('ARCHIVE_MISSING', 'true').lower() == 'true'
 
 # API settings
-API_VERSION = '2024-01'
+API_VERSION = '2026-01'
 GRAPHQL_URL = f'https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json'
 HEADERS = {
     'Content-Type': 'application/json',
@@ -442,8 +445,282 @@ def calculate_delta(
     return to_create, to_update, unchanged, missing_skus
 
 # =============================================================================
-# PRODUCT CREATE/UPDATE - Individual mutations (reliable)
+# BULK MUTATION - Try this first (fast), fall back to individual if it fails
 # =============================================================================
+
+def try_bulk_create(products: List[Dict]) -> Tuple[bool, int]:
+    """
+    Try to create products using bulk mutation (much faster).
+    Returns (success, count).
+    If it fails, caller should fall back to individual creates.
+    """
+    if not products or DRY_RUN:
+        return False, 0
+    
+    log("Attempting bulk create (fast method)...")
+    
+    # Generate JSONL
+    jsonl_file = 'bulk_creates.jsonl'
+    with open(jsonl_file, 'w', encoding='utf-8') as f:
+        for product in products:
+            sku = product.get('SKU', '')
+            category_info = product.get('category', {})
+            
+            title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', sku)
+            description = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
+            price = product.get('RegularPrice', '0.00')
+            inventory = int(float(product.get('Inventory', '0') or 0))
+            weight = float(product.get('weight', '0') or 0)
+            upc = product.get('upc', '')
+            product_type = category_info.get('product_type', 'Other > Needs Review')
+            status = 'ACTIVE' if inventory > 0 else 'DRAFT'
+            
+            tags = [
+                category_info.get('handle', 'uncategorized'),
+                f"confidence:{category_info.get('confidence', 'low')}",
+                f"source:{category_info.get('source', 'unknown')}"
+            ]
+            
+            mutation_input = {
+                "input": {
+                    "title": title,
+                    "descriptionHtml": description,
+                    "productType": product_type,
+                    "vendor": "JohnnyVac",
+                    "status": status,
+                    "tags": tags,
+                    "variants": [{
+                        "sku": sku,
+                        "price": str(price),
+                        "inventoryPolicy": "DENY",
+                        "barcode": upc if upc else None,
+                        "weight": weight,
+                        "weightUnit": "KILOGRAMS"
+                    }],
+                    "images": [{"src": f"{IMAGE_BASE_URL}{sku}.jpg"}]
+                }
+            }
+            f.write(json.dumps(mutation_input) + '\n')
+    
+    # Get staged upload URL
+    staged_mutation = """
+    mutation {
+      stagedUploadsCreate(input: [{
+        resource: BULK_MUTATION_VARIABLES,
+        filename: "bulk_input.jsonl",
+        mimeType: "text/jsonl",
+        httpMethod: POST
+      }]) {
+        stagedTargets {
+          url
+          resourceUrl
+          parameters { name value }
+        }
+        userErrors { field message }
+      }
+    }
+    """
+    
+    try:
+        result = graphql_request(staged_mutation, use_rate_limit=False)
+        
+        errors = result.get('data', {}).get('stagedUploadsCreate', {}).get('userErrors', [])
+        if errors:
+            log(f"Staged upload error: {errors}", 'WARNING')
+            return False, 0
+        
+        target = result['data']['stagedUploadsCreate']['stagedTargets'][0]
+        upload_url = target['url']
+        resource_url = target['resourceUrl']
+        params = {p['name']: p['value'] for p in target['parameters']}
+        
+        # Upload file
+        with open(jsonl_file, 'rb') as f:
+            files = {'file': ('bulk_input.jsonl', f, 'text/jsonl')}
+            upload_response = requests.post(upload_url, data=params, files=files, timeout=300)
+            upload_response.raise_for_status()
+        
+        log("✓ JSONL uploaded, starting bulk mutation...")
+        
+        # Run bulk mutation
+        bulk_mutation = f'''
+        mutation {{
+          bulkOperationRunMutation(
+            mutation: "mutation call($input: ProductInput!) {{ productCreate(input: $input) {{ product {{ id }} userErrors {{ field message }} }} }}",
+            stagedUploadPath: "{resource_url}"
+          ) {{
+            bulkOperation {{ id status }}
+            userErrors {{ field message }}
+          }}
+        }}
+        '''
+        
+        result = graphql_request(bulk_mutation, use_rate_limit=False)
+        
+        errors = result.get('data', {}).get('bulkOperationRunMutation', {}).get('userErrors', [])
+        if errors:
+            log(f"Bulk mutation error: {errors}", 'WARNING')
+            return False, 0
+        
+        # Poll for completion
+        return poll_bulk_mutation(len(products))
+        
+    except Exception as e:
+        log(f"Bulk create failed: {e}", 'WARNING')
+        return False, 0
+
+def try_bulk_update(products: List[Dict]) -> Tuple[bool, int]:
+    """
+    Try to update products using bulk mutation (much faster).
+    Returns (success, count).
+    """
+    if not products or DRY_RUN:
+        return False, 0
+    
+    log("Attempting bulk update (fast method)...")
+    
+    # Generate JSONL
+    jsonl_file = 'bulk_updates.jsonl'
+    with open(jsonl_file, 'w', encoding='utf-8') as f:
+        for product in products:
+            existing = product.get('_existing', {})
+            category_info = product.get('category', {})
+            
+            title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
+            description = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
+            product_type = category_info.get('product_type', existing.get('product_type', ''))
+            inventory = int(float(product.get('Inventory', '0') or 0))
+            status = 'ACTIVE' if inventory > 0 else 'DRAFT'
+            
+            tags = [
+                category_info.get('handle', 'uncategorized'),
+                f"confidence:{category_info.get('confidence', 'low')}",
+                f"source:{category_info.get('source', 'unknown')}"
+            ]
+            
+            mutation_input = {
+                "input": {
+                    "id": existing['product_id'],
+                    "title": title,
+                    "descriptionHtml": description,
+                    "productType": product_type,
+                    "tags": tags,
+                    "status": status
+                }
+            }
+            f.write(json.dumps(mutation_input) + '\n')
+    
+    # Get staged upload URL
+    staged_mutation = """
+    mutation {
+      stagedUploadsCreate(input: [{
+        resource: BULK_MUTATION_VARIABLES,
+        filename: "bulk_input.jsonl",
+        mimeType: "text/jsonl",
+        httpMethod: POST
+      }]) {
+        stagedTargets {
+          url
+          resourceUrl
+          parameters { name value }
+        }
+        userErrors { field message }
+      }
+    }
+    """
+    
+    try:
+        result = graphql_request(staged_mutation, use_rate_limit=False)
+        
+        errors = result.get('data', {}).get('stagedUploadsCreate', {}).get('userErrors', [])
+        if errors:
+            log(f"Staged upload error: {errors}", 'WARNING')
+            return False, 0
+        
+        target = result['data']['stagedUploadsCreate']['stagedTargets'][0]
+        upload_url = target['url']
+        resource_url = target['resourceUrl']
+        params = {p['name']: p['value'] for p in target['parameters']}
+        
+        # Upload file
+        with open(jsonl_file, 'rb') as f:
+            files = {'file': ('bulk_input.jsonl', f, 'text/jsonl')}
+            upload_response = requests.post(upload_url, data=params, files=files, timeout=300)
+            upload_response.raise_for_status()
+        
+        log("✓ JSONL uploaded, starting bulk mutation...")
+        
+        # Run bulk mutation
+        bulk_mutation = f'''
+        mutation {{
+          bulkOperationRunMutation(
+            mutation: "mutation call($input: ProductInput!) {{ productUpdate(input: $input) {{ product {{ id }} userErrors {{ field message }} }} }}",
+            stagedUploadPath: "{resource_url}"
+          ) {{
+            bulkOperation {{ id status }}
+            userErrors {{ field message }}
+          }}
+        }}
+        '''
+        
+        result = graphql_request(bulk_mutation, use_rate_limit=False)
+        
+        errors = result.get('data', {}).get('bulkOperationRunMutation', {}).get('userErrors', [])
+        if errors:
+            log(f"Bulk mutation error: {errors}", 'WARNING')
+            return False, 0
+        
+        # Poll for completion
+        return poll_bulk_mutation(len(products))
+        
+    except Exception as e:
+        log(f"Bulk update failed: {e}", 'WARNING')
+        return False, 0
+
+def poll_bulk_mutation(expected_count: int) -> Tuple[bool, int]:
+    """Poll bulk mutation until complete"""
+    log("Polling for bulk mutation completion...")
+    
+    query = """
+    query {
+      currentBulkOperation {
+        id
+        status
+        errorCode
+        objectCount
+        rootObjectCount
+        url
+      }
+    }
+    """
+    
+    start_time = time.time()
+    
+    while time.time() - start_time < MAX_POLL_TIME:
+        result = graphql_request(query, use_rate_limit=False)
+        operation = result.get('data', {}).get('currentBulkOperation')
+        
+        if not operation:
+            time.sleep(POLL_INTERVAL)
+            continue
+        
+        status = operation.get('status')
+        count = operation.get('objectCount', 0)
+        root_count = operation.get('rootObjectCount', 0)
+        
+        log(f"  Status: {status}, processed: {root_count}/{expected_count}")
+        
+        if status == 'COMPLETED':
+            log(f"✓ Bulk operation completed! Processed {root_count} products")
+            return True, root_count
+        elif status in ['FAILED', 'CANCELED']:
+            log(f"Bulk operation failed: {operation.get('errorCode')}", 'WARNING')
+            return False, 0
+        
+        time.sleep(POLL_INTERVAL)
+    
+    log("Bulk operation timed out", 'WARNING')
+    return False, 0
 
 def create_product(product_data: Dict) -> Optional[str]:
     """Create a single product"""
@@ -649,7 +926,7 @@ def main():
     start_time = time.time()
     
     log("=" * 70)
-    log("JohnnyVac to Shopify Sync v3.1 - HYBRID (Bulk Query + Batched Mutations)")
+    log("JohnnyVac to Shopify Sync v3.2 - SMART HYBRID (API 2026-01)")
     log("=" * 70)
     
     if DRY_RUN:
@@ -700,8 +977,33 @@ def main():
     log("\n[6/7] Syncing to Shopify...")
     sync_start = time.time()
     
-    created = batch_process(to_create, "Creating", create_product)
-    updated = batch_process(to_update, "Updating", update_product)
+    created = 0
+    updated = 0
+    
+    if DRY_RUN:
+        log(f"[DRY RUN] Would create {len(to_create)} products")
+        log(f"[DRY RUN] Would update {len(to_update)} products")
+        created = len(to_create)
+        updated = len(to_update)
+    else:
+        # Try bulk operations first (much faster with 2026-01 API)
+        # Fall back to individual mutations if bulk fails
+        
+        if to_create:
+            success, count = try_bulk_create(to_create)
+            if success:
+                created = count
+            else:
+                log("Falling back to individual creates...")
+                created = batch_process(to_create, "Creating", create_product)
+        
+        if to_update:
+            success, count = try_bulk_update(to_update)
+            if success:
+                updated = count
+            else:
+                log("Falling back to individual updates...")
+                updated = batch_process(to_update, "Updating", update_product)
     
     sync_time = time.time() - sync_start
     
