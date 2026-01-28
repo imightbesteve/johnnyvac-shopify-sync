@@ -25,8 +25,8 @@ SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 AUTO_PUBLISH = os.environ.get('AUTO_PUBLISH', 'false').lower() == 'true'
 CATEGORY_MAP_FILE = 'category_map_v4.json'
 
-GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2024-01/graphql.json"
-REST_BASE_URL = f"https://{SHOPIFY_STORE}/admin/api/2024-01"
+GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2026-01/graphql.json"
+REST_BASE_URL = f"https://{SHOPIFY_STORE}/admin/api/2026-01"
 
 HEADERS = {
     "Content-Type": "application/json",
