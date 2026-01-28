@@ -53,6 +53,12 @@ class ProductCategorizer:
         title_en = (product.get('ProductTitleEN') or '').lower()
         title_fr = (product.get('ProductTitleFR') or '').lower()
         combined_title = f"{title_en} {title_fr}"
+        jv_category = (product.get('ProductCategory') or '').strip()
+        
+        # Check if JV category should be skipped entirely
+        skip_categories = self.skip_patterns.get('skip_jv_categories', [])
+        if jv_category in skip_categories:
+            return True, f"JV Category '{jv_category}' is in skip list"
         
         # Check price threshold
         try:
