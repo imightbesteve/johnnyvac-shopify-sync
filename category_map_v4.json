@@ -27,6 +27,10 @@
         "discontinué",
         "ne pas commander"
       ],
+      "skip_jv_categories": [
+        "Promotional products",
+        "Johnny Vac Clearance & Overstock Products"
+      ],
       "max_price_threshold": 0.05
     },
     "global_part_keywords": [
@@ -349,7 +353,8 @@
         "switch", "reset", "sensor", "controller", "armature", "brush holder", "carbon brush",
         "on/off switch", "power switch", "rocker switch", "toggle switch", "capacitor",
         "transformer", "solenoid", "electrical", "amp", "volt", "watt",
-        "battery", "charger", "fan rotating", "fan stationary", "heater", "field coil"
+        "battery", "charger", "fan rotating", "fan stationary", "heater", "field coil",
+        "cable", "wiring", "electric", "electrode"
       ],
       "keywords_fr": [
         "moteur", "cordon", "prise", "fil électrique", "carte", "circuit", "relais", "interrupteur",
@@ -383,7 +388,8 @@
       "keywords_en": [
         "hose", "vacuum hose", "boyau", "cuff", "hose cuff", "elbow", "fitting", "adapter", 
         "coupling", "hose repair", "hose kit", "inlet", "outlet", "connector", "nipple",
-        "barb", "quick disconnect", "hose end", "hose adaptor", "extension hose"
+        "barb", "quick disconnect", "hose end", "hose adaptor", "extension hose", "tube",
+        "tubing", "duct", "pipe"
       ],
       "keywords_fr": ["boyau", "tuyau", "coude", "adaptateur", "raccord", "manchon"],
       "exclusions_en": [],
@@ -398,7 +404,7 @@
       "priority": 100,
       "keywords_en": [
         "filter", "hepa", "filtration", "filter bag", "cartridge filter", "dacron", "gortex", "sms",
-        "exhaust filter", "air filter", "pre-filter", "foam filter", "washable filter", "ulpa"
+        "exhaust filter", "air filter", "pre-filter", "foam filter", "washable filter", "ulpa", "foam"
       ],
       "keywords_fr": ["filtre", "hepa", "cartouche", "dacron", "gortex", "filtration"],
       "exclusions_en": ["bag hepa", "hepa bag", "sac hepa"],
@@ -475,7 +481,7 @@
       "keywords_en": [
         "nozzle", "wand", "extension wand", "floor nozzle", "crevice tool", "crevice took",
         "upholstery tool", "dusting brush", "power nozzle", "floor tool",
-        "telescopic wand", "curved wand", "straight wand"
+        "telescopic wand", "curved wand", "straight wand", "attachment tool", "vacuum tool"
       ],
       "keywords_fr": ["buse", "suceur", "tube", "rallonge", "embout"],
       "exclusions_en": [],
@@ -490,7 +496,9 @@
       "priority": 95,
       "keywords_en": [
         "assembly", "assy", "assembly complete", "housing", "cover", "body", "panel", 
-        "chassis", "carriage", "handle", "lid", "base", "shell", "case", "tank"
+        "chassis", "carriage", "handle", "lid", "base", "shell", "case", "tank",
+        "holder", "lever", "pedal", "knob", "button", "bracket", "door", "adjustment",
+        "frame", "support", "mount", "rack", "tray", "bin", "container"
       ],
       "keywords_fr": ["assemblage", "boîtier", "couvercle", "réservoir"],
       "exclusions_en": [],
