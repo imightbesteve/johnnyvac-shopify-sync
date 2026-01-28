@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-# sync_shopify_bulk_v3.py
+# sync_shopify_v3.py
 """
-JohnnyVac to Shopify Sync - BULK OPERATIONS VERSION
+JohnnyVac to Shopify Sync v3.1 - HYBRID APPROACH
 
-Uses Shopify's Bulk Operations API for fast processing of large catalogs.
-Can sync 7,000+ products in 10-20 minutes instead of 3+ hours.
+- Uses Bulk Query API to fetch existing products (fast!)
+- Uses batched individual mutations for creates/updates (reliable)
+- Much faster than v2 because bulk fetch saves ~2 hours
 
-How it works:
-1. Fetch CSV and categorize products (fast, ~2 seconds)
-2. Fetch existing Shopify products via bulk query (fast, ~1-2 minutes)
-3. Generate JSONL file with mutations
-4. Upload and execute bulk mutation (Shopify processes async)
-5. Poll for completion (~5-15 minutes for 7,000 products)
+Expected time: 30-45 minutes for full sync (vs 3+ hours in v2)
 """
 
 import os
@@ -20,8 +16,10 @@ import csv
 import json
 import time
 import requests
+import threading
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from categorizer_v4 import ProductCategorizer
 
@@ -38,17 +36,23 @@ LANGUAGE = 'en'
 DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 ARCHIVE_MISSING = os.environ.get('ARCHIVE_MISSING', 'true').lower() == 'true'
 
+# API settings
 API_VERSION = '2024-01'
 GRAPHQL_URL = f'https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json'
-
 HEADERS = {
     'Content-Type': 'application/json',
     'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
 }
 
-# Bulk operation polling
-POLL_INTERVAL = 10  # seconds
-MAX_POLL_TIME = 7200  # 2 hours max wait
+# Rate limiting - Shopify allows 2/sec for standard, 4/sec for Plus
+RATE_LIMIT_PER_SECOND = 2
+MAX_CONCURRENT = 4
+REQUEST_TIMEOUT = 30
+MAX_RETRIES = 3
+
+# Bulk operation settings
+POLL_INTERVAL = 10
+MAX_POLL_TIME = 3600  # 1 hour max for bulk query
 
 # =============================================================================
 # LOGGING
@@ -59,26 +63,71 @@ def log(message: str, level: str = 'INFO'):
     print(f"[{timestamp}] [{level}] {message}", flush=True)
 
 # =============================================================================
+# THREAD-SAFE RATE LIMITER
+# =============================================================================
+
+class RateLimiter:
+    def __init__(self, requests_per_second: float = 2.0):
+        self.requests_per_second = requests_per_second
+        self.requests: List[float] = []
+        self._lock = threading.Lock()
+    
+    def throttle(self):
+        with self._lock:
+            now = time.time()
+            self.requests = [t for t in self.requests if now - t < 1.0]
+            
+            if len(self.requests) >= self.requests_per_second:
+                oldest = min(self.requests)
+                wait_time = 1.0 - (now - oldest) + 0.05
+                if wait_time > 0:
+                    self._lock.release()
+                    try:
+                        time.sleep(wait_time)
+                    finally:
+                        self._lock.acquire()
+                    return self.throttle()
+            
+            self.requests.append(time.time())
+
+rate_limiter = RateLimiter(RATE_LIMIT_PER_SECOND)
+
+# =============================================================================
 # GRAPHQL HELPERS
 # =============================================================================
 
-def graphql_request(query: str, variables: Optional[Dict] = None) -> Dict:
+def graphql_request(query: str, variables: Optional[Dict] = None, use_rate_limit: bool = True) -> Dict:
     """Make a GraphQL request to Shopify"""
+    if use_rate_limit:
+        rate_limiter.throttle()
+    
     payload = {'query': query}
     if variables:
         payload['variables'] = variables
     
-    response = requests.post(GRAPHQL_URL, json=payload, headers=HEADERS, timeout=60)
-    response.raise_for_status()
-    result = response.json()
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(GRAPHQL_URL, json=payload, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            result = response.json()
+            
+            if 'errors' in result:
+                log(f"GraphQL errors: {result['errors']}", 'WARNING')
+            
+            return result
+            
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < MAX_RETRIES - 1:
+                wait = (attempt + 1) * 5
+                log(f"Connection error, retry {attempt + 1}/{MAX_RETRIES} in {wait}s...", 'WARNING')
+                time.sleep(wait)
+            else:
+                raise
     
-    if 'errors' in result:
-        log(f"GraphQL errors: {result['errors']}", 'ERROR')
-    
-    return result
+    return {}
 
 # =============================================================================
-# HTML CLEANING
+# UTILITY FUNCTIONS
 # =============================================================================
 
 def clean_html(html_str: str) -> str:
@@ -135,14 +184,13 @@ def fetch_csv_data() -> Tuple[List[Dict], List[str]]:
     return products, duplicate_skus
 
 # =============================================================================
-# BULK QUERY - Get existing products
+# BULK QUERY - Fetch existing products (FAST!)
 # =============================================================================
 
 def get_existing_products_bulk() -> Dict[str, Dict]:
-    """Use bulk operation to fetch all existing products"""
+    """Use bulk operation to fetch all existing products - this is the fast part!"""
     log("Starting bulk query for existing products...")
     
-    # Start bulk query
     mutation = """
     mutation {
       bulkOperationRunQuery(
@@ -183,19 +231,17 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
     }
     """
     
-    result = graphql_request(mutation)
+    result = graphql_request(mutation, use_rate_limit=False)
     
-    if result.get('data', {}).get('bulkOperationRunQuery', {}).get('userErrors'):
-        errors = result['data']['bulkOperationRunQuery']['userErrors']
+    errors = result.get('data', {}).get('bulkOperationRunQuery', {}).get('userErrors', [])
+    if errors:
         log(f"Bulk query errors: {errors}", 'ERROR')
-        return {}
+        raise Exception(f"Bulk query failed: {errors}")
     
-    # Poll for completion
-    products = poll_bulk_operation_and_parse_products()
-    return products
+    return poll_and_download_bulk_results()
 
-def poll_bulk_operation_and_parse_products() -> Dict[str, Dict]:
-    """Poll bulk operation and parse results into product dict"""
+def poll_and_download_bulk_results() -> Dict[str, Dict]:
+    """Poll bulk operation and download results"""
     log("Polling for bulk query completion...")
     
     query = """
@@ -213,35 +259,32 @@ def poll_bulk_operation_and_parse_products() -> Dict[str, Dict]:
     start_time = time.time()
     
     while time.time() - start_time < MAX_POLL_TIME:
-        result = graphql_request(query)
+        result = graphql_request(query, use_rate_limit=False)
         operation = result.get('data', {}).get('currentBulkOperation')
         
         if not operation:
-            log("No bulk operation found", 'WARNING')
-            return {}
+            time.sleep(POLL_INTERVAL)
+            continue
         
         status = operation.get('status')
-        log(f"  Bulk operation status: {status}, objects: {operation.get('objectCount', 0)}")
+        count = operation.get('objectCount', 0)
+        log(f"  Bulk operation status: {status}, objects: {count}")
         
         if status == 'COMPLETED':
             url = operation.get('url')
             if url:
-                return download_and_parse_bulk_results(url)
-            else:
-                log("Bulk operation completed but no URL", 'WARNING')
-                return {}
-        elif status in ['FAILED', 'CANCELED']:
-            log(f"Bulk operation failed: {operation.get('errorCode')}", 'ERROR')
+                return download_bulk_results(url)
             return {}
+        elif status in ['FAILED', 'CANCELED']:
+            raise Exception(f"Bulk operation failed: {operation.get('errorCode')}")
         
         time.sleep(POLL_INTERVAL)
     
-    log("Bulk operation timed out", 'ERROR')
-    return {}
+    raise Exception("Bulk operation timed out")
 
-def download_and_parse_bulk_results(url: str) -> Dict[str, Dict]:
-    """Download JSONL results and parse into product dict"""
-    log(f"Downloading bulk results...")
+def download_bulk_results(url: str) -> Dict[str, Dict]:
+    """Download and parse bulk query results"""
+    log("Downloading bulk results...")
     
     response = requests.get(url, timeout=120)
     response.raise_for_status()
@@ -254,18 +297,18 @@ def download_and_parse_bulk_results(url: str) -> Dict[str, Dict]:
             continue
         obj = json.loads(line)
         
-        # Product line
-        if 'variants' not in obj and 'sku' not in obj and 'id' in obj:
+        # Product line (has id but not sku)
+        if 'id' in obj and 'sku' not in obj and '__parentId' not in obj:
             current_product = {
                 'product_id': obj['id'],
                 'title': obj.get('title', ''),
                 'product_type': obj.get('productType', ''),
                 'status': obj.get('status', 'ACTIVE')
             }
-        # Variant line (child of product)
-        elif 'sku' in obj and current_product:
+        # Variant line (has sku and __parentId)
+        elif 'sku' in obj:
             sku = obj.get('sku')
-            if sku:
+            if sku and current_product:
                 products[sku] = {
                     **current_product,
                     'variant_id': obj['id'],
@@ -276,13 +319,9 @@ def download_and_parse_bulk_results(url: str) -> Dict[str, Dict]:
     log(f"✓ Parsed {len(products)} existing products from Shopify")
     return products
 
-# =============================================================================
-# ALTERNATIVE: Paginated fetch (if bulk fails)
-# =============================================================================
-
 def get_existing_products_paginated() -> Dict[str, Dict]:
-    """Fallback: fetch products with pagination"""
-    log("Fetching existing products (paginated)...")
+    """Fallback: fetch products with pagination if bulk fails"""
+    log("Using paginated fetch (fallback)...")
     products = {}
     cursor = None
     page = 0
@@ -316,8 +355,7 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
     
     while True:
         page += 1
-        variables = {'cursor': cursor} if cursor else None
-        result = graphql_request(query, variables)
+        result = graphql_request(query, {'cursor': cursor} if cursor else None)
         
         edges = result.get('data', {}).get('products', {}).get('edges', [])
         page_info = result.get('data', {}).get('products', {}).get('pageInfo', {})
@@ -338,13 +376,12 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                         'inventory': variant.get('inventoryQuantity', 0)
                     }
         
-        if page % 10 == 0:
+        if page % 20 == 0:
             log(f"  Page {page}, products: {len(products)}")
         
         if not page_info.get('hasNextPage'):
             break
         cursor = edges[-1]['cursor']
-        time.sleep(0.5)  # Rate limiting
     
     log(f"✓ Fetched {len(products)} existing products")
     return products
@@ -405,243 +442,91 @@ def calculate_delta(
     return to_create, to_update, unchanged, missing_skus
 
 # =============================================================================
-# BULK MUTATION - Create/Update products
+# PRODUCT CREATE/UPDATE - Individual mutations (reliable)
 # =============================================================================
 
-def generate_jsonl_for_creates(products: List[Dict], filename: str) -> int:
-    """Generate JSONL file for bulk product creation"""
-    count = 0
+def create_product(product_data: Dict) -> Optional[str]:
+    """Create a single product"""
+    sku = product_data.get('SKU', '')
+    category_info = product_data.get('category', {})
     
-    with open(filename, 'w', encoding='utf-8') as f:
-        for product in products:
-            sku = product.get('SKU', '')
-            category_info = product.get('category', {})
-            
-            title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', sku)
-            description = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
-            price = product.get('RegularPrice', '0.00')
-            inventory = int(float(product.get('Inventory', '0') or 0))
-            weight = float(product.get('weight', '0') or 0)
-            upc = product.get('upc', '')
-            product_type = category_info.get('product_type', 'Other > Needs Review')
-            status = 'ACTIVE' if inventory > 0 else 'DRAFT'
-            
-            tags = [
-                category_info.get('handle', 'uncategorized'),
-                f"confidence:{category_info.get('confidence', 'low')}",
-                f"source:{category_info.get('source', 'unknown')}"
-            ]
-            
-            mutation_input = {
-                "input": {
-                    "title": title,
-                    "descriptionHtml": description,
-                    "productType": product_type,
-                    "vendor": "JohnnyVac",
-                    "status": status,
-                    "tags": tags,
-                    "variants": [{
-                        "sku": sku,
-                        "price": str(price),
-                        "inventoryPolicy": "DENY",
-                        "barcode": upc if upc else None,
-                        "weight": weight,
-                        "weightUnit": "KILOGRAMS"
-                    }],
-                    "images": [{"src": f"{IMAGE_BASE_URL}{sku}.jpg"}]
-                }
-            }
-            
-            f.write(json.dumps(mutation_input) + '\n')
-            count += 1
+    if DRY_RUN:
+        return f"dry-run-{sku}"
     
-    return count
-
-def generate_jsonl_for_updates(products: List[Dict], filename: str) -> int:
-    """Generate JSONL file for bulk product updates"""
-    count = 0
+    title = product_data.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', sku)
+    description = clean_html(product_data.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
+    price = product_data.get('RegularPrice', '0.00')
+    inventory = int(float(product_data.get('Inventory', '0') or 0))
+    weight = float(product_data.get('weight', '0') or 0)
+    upc = product_data.get('upc', '')
+    product_type = category_info.get('product_type', 'Other > Needs Review')
+    status = 'ACTIVE' if inventory > 0 else 'DRAFT'
     
-    with open(filename, 'w', encoding='utf-8') as f:
-        for product in products:
-            existing = product.get('_existing', {})
-            category_info = product.get('category', {})
-            
-            title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
-            description = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
-            product_type = category_info.get('product_type', existing.get('product_type', ''))
-            inventory = int(float(product.get('Inventory', '0') or 0))
-            status = 'ACTIVE' if inventory > 0 else 'DRAFT'
-            
-            tags = [
-                category_info.get('handle', 'uncategorized'),
-                f"confidence:{category_info.get('confidence', 'low')}",
-                f"source:{category_info.get('source', 'unknown')}"
-            ]
-            
-            mutation_input = {
-                "input": {
-                    "id": existing['product_id'],
-                    "title": title,
-                    "descriptionHtml": description,
-                    "productType": product_type,
-                    "status": status,
-                    "tags": tags
-                }
-            }
-            
-            f.write(json.dumps(mutation_input) + '\n')
-            count += 1
+    tags = [
+        category_info.get('handle', 'uncategorized'),
+        f"confidence:{category_info.get('confidence', 'low')}",
+        f"source:{category_info.get('source', 'unknown')}"
+    ]
     
-    return count
-
-def upload_jsonl_and_run_bulk_mutation(jsonl_file: str, mutation_type: str = 'productCreate') -> bool:
-    """Upload JSONL file and run bulk mutation"""
-    
-    # Step 1: Get staged upload URL
-    log(f"Getting staged upload URL for {mutation_type}...")
-    
-    staged_mutation = """
-    mutation {
-      stagedUploadsCreate(input: [{
-        resource: BULK_MUTATION_VARIABLES,
-        filename: "bulk_input.jsonl",
-        mimeType: "text/jsonl",
-        httpMethod: POST
-      }]) {
-        stagedTargets {
-          url
-          resourceUrl
-          parameters {
-            name
-            value
-          }
+    mutation = """
+    mutation createProduct($input: ProductInput!) {
+        productCreate(input: $input) {
+            product { id }
+            userErrors { field message }
         }
-        userErrors {
-          field
-          message
-        }
-      }
     }
     """
     
-    result = graphql_request(staged_mutation)
-    
-    if result.get('data', {}).get('stagedUploadsCreate', {}).get('userErrors'):
-        log(f"Staged upload errors: {result['data']['stagedUploadsCreate']['userErrors']}", 'ERROR')
-        return False
-    
-    target = result['data']['stagedUploadsCreate']['stagedTargets'][0]
-    upload_url = target['url']
-    resource_url = target['resourceUrl']
-    params = {p['name']: p['value'] for p in target['parameters']}
-    
-    # Step 2: Upload the file
-    log(f"Uploading JSONL file...")
-    
-    with open(jsonl_file, 'rb') as f:
-        files = {'file': ('bulk_input.jsonl', f, 'text/jsonl')}
-        upload_response = requests.post(upload_url, data=params, files=files, timeout=300)
-        upload_response.raise_for_status()
-    
-    log(f"✓ File uploaded successfully")
-    
-    # Step 3: Run bulk mutation
-    log(f"Starting bulk {mutation_type} operation...")
-    
-    bulk_mutation = f"""
-    mutation {{
-      bulkOperationRunMutation(
-        mutation: "mutation call($input: ProductInput!) {{ {mutation_type}(input: $input) {{ product {{ id }} userErrors {{ field message }} }} }}",
-        stagedUploadPath: "{resource_url}"
-      ) {{
-        bulkOperation {{
-          id
-          status
-        }}
-        userErrors {{
-          field
-          message
-        }}
-      }}
-    }}
-    """
-    
-    result = graphql_request(bulk_mutation)
-    
-    if result.get('data', {}).get('bulkOperationRunMutation', {}).get('userErrors'):
-        errors = result['data']['bulkOperationRunMutation']['userErrors']
-        log(f"Bulk mutation errors: {errors}", 'ERROR')
-        return False
-    
-    # Step 4: Poll for completion
-    return poll_bulk_mutation_completion()
-
-def poll_bulk_mutation_completion() -> bool:
-    """Poll until bulk mutation completes"""
-    log("Polling for bulk mutation completion...")
-    
-    query = """
-    query {
-      currentBulkOperation {
-        id
-        status
-        errorCode
-        objectCount
-        rootObjectCount
-        url
-      }
+    variables = {
+        'input': {
+            'title': title,
+            'descriptionHtml': description,
+            'productType': product_type,
+            'tags': tags,
+            'vendor': 'JohnnyVac',
+            'status': status,
+            'variants': [{
+                'sku': sku,
+                'price': str(price),
+                'inventoryPolicy': 'DENY',
+                'barcode': upc if upc else None,
+                'weight': weight,
+                'weightUnit': 'KILOGRAMS'
+            }],
+            'images': [{'src': f"{IMAGE_BASE_URL}{sku}.jpg"}]
+        }
     }
-    """
     
-    start_time = time.time()
-    last_count = 0
+    result = graphql_request(mutation, variables)
     
-    while time.time() - start_time < MAX_POLL_TIME:
-        result = graphql_request(query)
-        operation = result.get('data', {}).get('currentBulkOperation')
-        
-        if not operation:
-            time.sleep(POLL_INTERVAL)
-            continue
-        
-        status = operation.get('status')
-        count = operation.get('objectCount', 0)
-        root_count = operation.get('rootObjectCount', 0)
-        
-        if count != last_count:
-            log(f"  Status: {status}, processed: {count} objects, {root_count} products")
-            last_count = count
-        
-        if status == 'COMPLETED':
-            log(f"✓ Bulk operation completed! Processed {root_count} products")
-            return True
-        elif status in ['FAILED', 'CANCELED']:
-            log(f"Bulk operation failed: {operation.get('errorCode')}", 'ERROR')
-            # Try to get error details
-            if operation.get('url'):
-                try:
-                    err_response = requests.get(operation['url'], timeout=60)
-                    log(f"Error details: {err_response.text[:500]}", 'ERROR')
-                except:
-                    pass
-            return False
-        
-        time.sleep(POLL_INTERVAL)
-    
-    log("Bulk operation timed out", 'ERROR')
-    return False
+    if result.get('data', {}).get('productCreate', {}).get('product'):
+        return result['data']['productCreate']['product']['id']
+    else:
+        errors = result.get('data', {}).get('productCreate', {}).get('userErrors', [])
+        if errors:
+            log(f"Create {sku} failed: {errors}", 'WARNING')
+        return None
 
-# =============================================================================
-# ARCHIVE MISSING PRODUCTS (one by one, but usually small count)
-# =============================================================================
-
-def archive_missing_products(missing_skus: List[str], existing_products: Dict[str, Dict]) -> int:
-    """Archive products no longer in CSV"""
-    if not missing_skus or not ARCHIVE_MISSING:
-        return 0
+def update_product(product_data: Dict) -> bool:
+    """Update a single product"""
+    existing = product_data.get('_existing', {})
+    category_info = product_data.get('category', {})
+    sku = product_data.get('SKU', '')
     
-    log(f"Archiving {len(missing_skus)} missing products...")
-    archived = 0
+    if DRY_RUN:
+        return True
+    
+    title = product_data.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
+    description = clean_html(product_data.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
+    product_type = category_info.get('product_type', existing.get('product_type', ''))
+    inventory = int(float(product_data.get('Inventory', '0') or 0))
+    status = 'ACTIVE' if inventory > 0 else 'DRAFT'
+    
+    tags = [
+        category_info.get('handle', 'uncategorized'),
+        f"confidence:{category_info.get('confidence', 'low')}",
+        f"source:{category_info.get('source', 'unknown')}"
+    ]
     
     mutation = """
     mutation updateProduct($input: ProductInput!) {
@@ -652,26 +537,106 @@ def archive_missing_products(missing_skus: List[str], existing_products: Dict[st
     }
     """
     
+    variables = {
+        'input': {
+            'id': existing['product_id'],
+            'title': title,
+            'descriptionHtml': description,
+            'productType': product_type,
+            'tags': tags,
+            'status': status
+        }
+    }
+    
+    result = graphql_request(mutation, variables)
+    
+    if result.get('data', {}).get('productUpdate', {}).get('product'):
+        return True
+    else:
+        errors = result.get('data', {}).get('productUpdate', {}).get('userErrors', [])
+        if errors:
+            log(f"Update {sku} failed: {errors}", 'WARNING')
+        return False
+
+def batch_process(products: List[Dict], operation: str, func) -> int:
+    """Process products in batches with concurrent requests"""
+    if not products:
+        return 0
+    
+    log(f"\n{operation} {len(products)} products...")
+    
+    successful = 0
+    failed = 0
+    CHUNK_SIZE = 50  # Report progress every 50 products
+    
+    start_time = time.time()
+    
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
+        futures = {executor.submit(func, p): p for p in products}
+        
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                result = future.result()
+                if result:
+                    successful += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                failed += 1
+                log(f"Error: {e}", 'WARNING')
+            
+            # Progress update every CHUNK_SIZE products
+            if i % CHUNK_SIZE == 0 or i == len(products):
+                elapsed = time.time() - start_time
+                rate = i / elapsed if elapsed > 0 else 0
+                remaining = (len(products) - i) / rate if rate > 0 else 0
+                log(f"  Progress: {i}/{len(products)} ({successful} ok, {failed} failed) - {rate:.1f}/sec, ~{remaining:.0f}s remaining")
+    
+    log(f"✓ {operation} complete: {successful} successful, {failed} failed")
+    return successful
+
+# =============================================================================
+# ARCHIVE MISSING PRODUCTS
+# =============================================================================
+
+def archive_product(sku: str, existing: Dict) -> bool:
+    """Archive a single product (set to DRAFT)"""
+    if existing.get('status') == 'DRAFT':
+        return True  # Already archived
+    
+    if DRY_RUN:
+        return True
+    
+    mutation = """
+    mutation updateProduct($input: ProductInput!) {
+        productUpdate(input: $input) {
+            product { id }
+            userErrors { field message }
+        }
+    }
+    """
+    
+    result = graphql_request(mutation, {
+        'input': {
+            'id': existing['product_id'],
+            'status': 'DRAFT'
+        }
+    })
+    
+    return bool(result.get('data', {}).get('productUpdate', {}).get('product'))
+
+def archive_missing_products(missing_skus: List[str], existing_products: Dict[str, Dict]) -> int:
+    """Archive products no longer in CSV"""
+    if not missing_skus or not ARCHIVE_MISSING:
+        return 0
+    
+    log(f"\nArchiving {len(missing_skus)} missing products...")
+    
+    archived = 0
     for sku in missing_skus:
         existing = existing_products.get(sku)
-        if not existing or existing.get('status') == 'DRAFT':
-            continue
-        
-        if DRY_RUN:
+        if existing and archive_product(sku, existing):
             archived += 1
-            continue
-        
-        result = graphql_request(mutation, {
-            'input': {
-                'id': existing['product_id'],
-                'status': 'DRAFT'
-            }
-        })
-        
-        if result.get('data', {}).get('productUpdate', {}).get('product'):
-            archived += 1
-        
-        time.sleep(0.5)  # Rate limit
     
     log(f"✓ Archived {archived} products")
     return archived
@@ -684,7 +649,7 @@ def main():
     start_time = time.time()
     
     log("=" * 70)
-    log("JohnnyVac to Shopify Sync v3.0 - BULK OPERATIONS")
+    log("JohnnyVac to Shopify Sync v3.1 - HYBRID (Bulk Query + Batched Mutations)")
     log("=" * 70)
     
     if DRY_RUN:
@@ -714,13 +679,16 @@ def main():
     categorizer.export_needs_review(categorized_products, 'needs_review.csv')
     categorizer.export_skipped(skipped_products, 'skipped_products.csv')
     
-    # Step 4: Fetch existing products
+    # Step 4: Fetch existing products (using bulk query - fast!)
     log("\n[4/7] Fetching existing Shopify products...")
+    fetch_start = time.time()
     try:
         existing_products = get_existing_products_bulk()
     except Exception as e:
-        log(f"Bulk query failed, using paginated fallback: {e}", 'WARNING')
+        log(f"Bulk query failed ({e}), using paginated fallback...", 'WARNING')
         existing_products = get_existing_products_paginated()
+    fetch_time = time.time() - fetch_start
+    log(f"  Fetch completed in {fetch_time:.1f}s")
     
     # Step 5: Calculate delta
     log("\n[5/7] Calculating delta...")
@@ -730,39 +698,12 @@ def main():
     
     # Step 6: Execute sync
     log("\n[6/7] Syncing to Shopify...")
+    sync_start = time.time()
     
-    created = 0
-    updated = 0
+    created = batch_process(to_create, "Creating", create_product)
+    updated = batch_process(to_update, "Updating", update_product)
     
-    if DRY_RUN:
-        log(f"[DRY RUN] Would create {len(to_create)} products")
-        log(f"[DRY RUN] Would update {len(to_update)} products")
-        created = len(to_create)
-        updated = len(to_update)
-    else:
-        # Create new products
-        if to_create:
-            log(f"\nCreating {len(to_create)} new products...")
-            jsonl_file = 'bulk_creates.jsonl'
-            count = generate_jsonl_for_creates(to_create, jsonl_file)
-            log(f"Generated {count} mutations in {jsonl_file}")
-            
-            if upload_jsonl_and_run_bulk_mutation(jsonl_file, 'productCreate'):
-                created = count
-            else:
-                log("Bulk create failed!", 'ERROR')
-        
-        # Update existing products
-        if to_update:
-            log(f"\nUpdating {len(to_update)} products...")
-            jsonl_file = 'bulk_updates.jsonl'
-            count = generate_jsonl_for_updates(to_update, jsonl_file)
-            log(f"Generated {count} mutations in {jsonl_file}")
-            
-            if upload_jsonl_and_run_bulk_mutation(jsonl_file, 'productUpdate'):
-                updated = count
-            else:
-                log("Bulk update failed!", 'ERROR')
+    sync_time = time.time() - sync_start
     
     # Step 7: Archive missing
     log("\n[7/7] Archiving missing products...")
@@ -774,13 +715,16 @@ def main():
     log("\n" + "=" * 70)
     log("SYNC COMPLETE")
     log("=" * 70)
-    log(f"Total time: {total_time/60:.1f} minutes")
+    log(f"Total time: {total_time/60:.1f} minutes ({total_time:.0f} seconds)")
     log(f"\nResults:")
     log(f"  ✅ Created: {created}")
     log(f"  ✏️  Updated: {updated}")
     log(f"  ⏭️  Unchanged: {len(unchanged)}")
     log(f"  🗑️  Archived: {archived}")
     log(f"  ⛔ Skipped: {len(skipped_products)}")
+    log(f"\nPerformance:")
+    log(f"  Fetch existing: {fetch_time:.1f}s (bulk query)")
+    log(f"  Sync operations: {sync_time:.1f}s")
     
     if DRY_RUN:
         log("\n🔸 DRY RUN - No actual changes were made")
