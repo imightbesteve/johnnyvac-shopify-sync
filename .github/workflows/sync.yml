@@ -83,7 +83,7 @@ jobs:
           if [ "$DRY_RUN" = "true" ]; then
             echo "🔸 DRY RUN MODE - No changes will be made"
           fi
-          python sync_shopify_v2.py
+          python -u sync_shopify_v2.py
 
       - name: Upload needs_review.csv artifact
         if: always()
