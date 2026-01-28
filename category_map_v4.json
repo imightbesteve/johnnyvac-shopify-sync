@@ -1,7 +1,7 @@
 {
   "settings": {
-    "version": "4.0",
-    "description": "Category map v4 — JohnnyVac categories as primary, keyword matching as fallback. Fixed priority ordering.",
+    "version": "4.1",
+    "description": "Category map v4.1 — Added missing vacuum equipment categories",
     "notes": [
       "1. First try to map using JohnnyVac's ProductCategory field (jv_category_mappings)",
       "2. If JV category is generic (All Parts, Johnny Vac Parts), use keyword matching",
@@ -326,10 +326,41 @@
       "handle": "equipment-carpet-extractors",
       "confidence": "high"
     },
+    
     "Stick Vacuums": {
       "productType": "Equipment & Machines > Commercial Vacuums",
       "handle": "equipment-commercial-vacuums",
       "confidence": "high"
+    },
+    "Upright Vacuums": {
+      "productType": "Equipment & Machines > Upright Vacuums",
+      "handle": "equipment-upright-vacuums",
+      "confidence": "high"
+    },
+    "Backpack Vacuums": {
+      "productType": "Equipment & Machines > Backpack Vacuums",
+      "handle": "equipment-backpack-vacuums",
+      "confidence": "high"
+    },
+    "Canister Vacuums": {
+      "productType": "Equipment & Machines > Canister Vacuums",
+      "handle": "equipment-canister-vacuums",
+      "confidence": "high"
+    },
+    "Wet & Dry Vacuums": {
+      "productType": "Equipment & Machines > Wet & Dry Vacuums",
+      "handle": "equipment-wet-dry-vacuums",
+      "confidence": "high"
+    },
+    "HEPA Specialized Vacuums": {
+      "productType": "Equipment & Machines > HEPA Vacuums",
+      "handle": "equipment-hepa-vacuums",
+      "confidence": "high"
+    },
+    "Residential Vacuums": {
+      "productType": "Equipment & Machines > Commercial Vacuums",
+      "handle": "equipment-commercial-vacuums",
+      "confidence": "medium"
     },
     
     "Johnny Vac Parts (*)": null,
@@ -681,15 +712,119 @@
     },
 
     {
+      "productType": "Equipment & Machines > Upright Vacuums",
+      "handle": "equipment-upright-vacuums",
+      "title": "Upright Vacuums",
+      "priority": 55,
+      "keywords_en": [
+        "upright vacuum", "upright vac", "commercial upright"
+      ],
+      "keywords_fr": ["aspirateur vertical"],
+      "exclusions_en": [
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "replacement", "part", "brush roll", "nozzle", "wand", "pack of", "wheel", "caster"
+      ],
+      "exclusions_fr": [
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "prise", "remplacement", "pièce", "paquet de"
+      ],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Equipment & Machines > Backpack Vacuums",
+      "handle": "equipment-backpack-vacuums",
+      "title": "Backpack Vacuums",
+      "priority": 55,
+      "keywords_en": [
+        "backpack vacuum", "back pack vacuum", "backpack vac"
+      ],
+      "keywords_fr": ["aspirateur sac à dos"],
+      "exclusions_en": [
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
+      ],
+      "exclusions_fr": [
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "prise", "remplacement", "pièce", "paquet de"
+      ],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Equipment & Machines > Canister Vacuums",
+      "handle": "equipment-canister-vacuums",
+      "title": "Canister Vacuums",
+      "priority": 55,
+      "keywords_en": [
+        "canister vacuum", "canister vac"
+      ],
+      "keywords_fr": ["aspirateur traîneau"],
+      "exclusions_en": [
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
+      ],
+      "exclusions_fr": [
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "prise", "remplacement", "pièce", "paquet de"
+      ],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Equipment & Machines > Wet & Dry Vacuums",
+      "handle": "equipment-wet-dry-vacuums",
+      "title": "Wet & Dry Vacuums",
+      "priority": 55,
+      "keywords_en": [
+        "wet dry vacuum", "wet and dry vacuum", "wet/dry vacuum", "shop vac"
+      ],
+      "keywords_fr": ["aspirateur eau et poussière", "aspirateur sec et humide"],
+      "exclusions_en": [
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
+      ],
+      "exclusions_fr": [
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "prise", "remplacement", "pièce", "paquet de"
+      ],
+      "min_products": 1
+    },
+
+    {
+      "productType": "Equipment & Machines > HEPA Vacuums",
+      "handle": "equipment-hepa-vacuums",
+      "title": "HEPA Specialized Vacuums",
+      "priority": 55,
+      "keywords_en": [
+        "hepa vacuum", "hepa certified vacuum"
+      ],
+      "keywords_fr": ["aspirateur hepa"],
+      "exclusions_en": [
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
+      ],
+      "exclusions_fr": [
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "prise", "remplacement", "pièce", "paquet de"
+      ],
+      "min_products": 1
+    },
+
+    {
       "productType": "Equipment & Machines > Commercial Vacuums",
       "handle": "equipment-commercial-vacuums",
       "title": "Commercial Vacuums",
       "priority": 50,
       "keywords_en": [
-        "upright vacuum", "backpack vacuum", "canister vacuum", "wet dry vacuum",
-        "commercial vacuum", "shop vac", "vacuum cleaner", "stick vacuum"
+        "commercial vacuum", "vacuum cleaner", "stick vacuum"
       ],
-      "keywords_fr": ["aspirateur vertical", "aspirateur sac à dos", "aspirateur traîneau", "aspirateur commercial"],
+      "keywords_fr": ["aspirateur commercial"],
       "exclusions_en": [
         "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
         "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
