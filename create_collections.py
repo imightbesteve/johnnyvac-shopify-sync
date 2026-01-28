@@ -228,7 +228,7 @@ def create_automated_collection(
                 "appliedDisjunctively": False,
                 "rules": [
                     {
-                        "column": "PRODUCT_TYPE",
+                        "column": "TYPE",
                         "relation": "EQUALS",
                         "condition": product_type
                     }
