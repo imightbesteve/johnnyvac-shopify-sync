@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-JohnnyVac to Shopify - Automated Collection Creator v2
+JohnnyVac to Shopify - Automated Collection Creator v2.1
 
 Creates smart collections based on category_map_v4.json taxonomy.
 Stateless, CI-compatible, fully idempotent.
+
+FIXED: Better error handling to show actual GraphQL errors
 
 Environment Variables:
     SHOPIFY_STORE: Store URL (e.g., kingsway-janitorial.myshopify.com)
@@ -25,8 +27,9 @@ SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 AUTO_PUBLISH = os.environ.get('AUTO_PUBLISH', 'false').lower() == 'true'
 CATEGORY_MAP_FILE = 'category_map_v4.json'
 
-GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/2026-01/graphql.json"
-REST_BASE_URL = f"https://{SHOPIFY_STORE}/admin/api/2026-01"
+API_VERSION = '2026-01'
+GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json"
+REST_BASE_URL = f"https://{SHOPIFY_STORE}/admin/api/{API_VERSION}"
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -99,6 +102,14 @@ def get_product_counts_by_type() -> Dict[str, int]:
             response.raise_for_status()
             data = response.json()
             
+            # Check for GraphQL errors
+            if 'errors' in data:
+                log(f"⚠️  GraphQL errors: {data['errors']}")
+            
+            if 'data' not in data:
+                log(f"❌ No data in response: {data}")
+                break
+            
             edges = data['data']['products']['edges']
             page_info = data['data']['products']['pageInfo']
             
@@ -133,7 +144,9 @@ def collection_exists_by_handle(handle: str) -> Optional[Dict]:
         id
         handle
         title
-        productsCount
+        productsCount {
+          count
+        }
       }
     }
     '''
@@ -146,8 +159,21 @@ def collection_exists_by_handle(handle: str) -> Optional[Dict]:
             timeout=30
         )
         response.raise_for_status()
-        data = response.json().get("data", {})
-        return data.get("collectionByHandle")
+        data = response.json()
+        
+        if 'errors' in data:
+            log(f"⚠️  Check collection errors: {data['errors']}")
+            
+        if 'data' not in data:
+            return None
+            
+        collection = data.get("data", {}).get("collectionByHandle")
+        if collection:
+            # Normalize productsCount
+            products_count = collection.get('productsCount', {})
+            if isinstance(products_count, dict):
+                collection['productsCount'] = products_count.get('count', 0)
+        return collection
     except Exception as e:
         log(f"⚠️  Error checking collection '{handle}': {e}")
         return None
@@ -160,6 +186,15 @@ def create_automated_collection(
     description: str = None
 ) -> Optional[Dict]:
     """Create an automated collection with productType rule"""
+    
+    # Create a nice description
+    if not description:
+        parts = product_type.split(' > ')
+        if len(parts) > 1:
+            description = f"<p>Browse our selection of {parts[-1].lower()}.</p>"
+        else:
+            description = f"<p>All products in the {title} category.</p>"
+    
     mutation = '''
     mutation CollectionCreate($input: CollectionInput!) {
       collectionCreate(input: $input) {
@@ -183,15 +218,6 @@ def create_automated_collection(
       }
     }
     '''
-    
-    # Create a nice description
-    if not description:
-        # Parse the category path for a nicer description
-        parts = product_type.split(' > ')
-        if len(parts) > 1:
-            description = f"<p>Browse our selection of {parts[-1].lower()}.</p>"
-        else:
-            description = f"<p>All products in the {title} category.</p>"
     
     variables = {
         "input": {
@@ -221,40 +247,126 @@ def create_automated_collection(
         response.raise_for_status()
         payload = response.json()
         
-        errors = payload.get("data", {}).get("collectionCreate", {}).get("userErrors", [])
+        # DEBUG: Print full response if there's an issue
+        if 'errors' in payload:
+            log(f"  ❌ GraphQL errors: {payload['errors']}")
+            return None
+        
+        if 'data' not in payload:
+            log(f"  ❌ No 'data' in response. Full response: {json.dumps(payload, indent=2)}")
+            return None
+        
+        collection_create = payload.get("data", {}).get("collectionCreate")
+        if not collection_create:
+            log(f"  ❌ No 'collectionCreate' in response data")
+            return None
+        
+        errors = collection_create.get("userErrors", [])
         if errors:
             log(f"  ❌ Collection create errors: {errors}")
             return None
         
-        return payload["data"]["collectionCreate"]["collection"]
+        return collection_create.get("collection")
         
+    except requests.exceptions.HTTPError as e:
+        log(f"  ❌ HTTP Error creating collection '{title}': {e}")
+        log(f"     Response: {e.response.text if e.response else 'No response'}")
+        return None
     except Exception as e:
         log(f"  ❌ Error creating collection '{title}': {e}")
         return None
 
 
 def publish_collection(collection_gid: str) -> bool:
-    """Publish collection to Online Store using REST API"""
-    # Extract numeric ID from GID
-    collection_id = collection_gid.split('/')[-1]
+    """Publish collection to Online Store using publishablePublish mutation"""
     
-    url = f"{REST_BASE_URL}/collections/{collection_id}.json"
+    mutation = '''
+    mutation publishablePublish($id: ID!, $input: [PublicationInput!]!) {
+      publishablePublish(id: $id, input: $input) {
+        publishable {
+          availablePublicationsCount {
+            count
+          }
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    '''
+    
+    # First, get the Online Store publication ID
+    pub_query = '''
+    query {
+      publications(first: 10) {
+        edges {
+          node {
+            id
+            name
+          }
+        }
+      }
+    }
+    '''
     
     try:
-        payload = {
-            "collection": {
-                "id": int(collection_id),
-                "published": True
-            }
-        }
-        
-        response = requests.put(
-            url,
+        # Get publications
+        response = requests.post(
+            GRAPHQL_URL,
             headers=HEADERS,
-            json=payload,
+            json={"query": pub_query},
             timeout=30
         )
         response.raise_for_status()
+        data = response.json()
+        
+        if 'errors' in data:
+            log(f"  ⚠️  Error getting publications: {data['errors']}")
+            return False
+        
+        publications = data.get('data', {}).get('publications', {}).get('edges', [])
+        
+        # Find Online Store publication
+        online_store_pub = None
+        for pub in publications:
+            name = pub['node'].get('name', '').lower()
+            if 'online store' in name or 'online_store' in name:
+                online_store_pub = pub['node']['id']
+                break
+        
+        if not online_store_pub:
+            # Just use the first publication if we can't find Online Store
+            if publications:
+                online_store_pub = publications[0]['node']['id']
+            else:
+                log(f"  ⚠️  No publications found")
+                return False
+        
+        # Publish the collection
+        variables = {
+            "id": collection_gid,
+            "input": [{"publicationId": online_store_pub}]
+        }
+        
+        response = requests.post(
+            GRAPHQL_URL,
+            headers=HEADERS,
+            json={"query": mutation, "variables": variables},
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        if 'errors' in result:
+            log(f"  ⚠️  Publish errors: {result['errors']}")
+            return False
+        
+        user_errors = result.get('data', {}).get('publishablePublish', {}).get('userErrors', [])
+        if user_errors:
+            log(f"  ⚠️  Publish user errors: {user_errors}")
+            return False
+        
         return True
         
     except Exception as e:
@@ -297,7 +409,8 @@ def create_collections(categories: List[Dict], product_counts: Dict[str, int]):
         # Check if already exists
         existing = collection_exists_by_handle(handle)
         if existing:
-            log(f"   ✅ Already exists ({existing.get('productsCount', 0)} products)")
+            count = existing.get('productsCount', 0)
+            log(f"   ✅ Already exists ({count} products)")
             skipped_exists += 1
             time.sleep(RATE_LIMIT_DELAY)
             continue
@@ -344,7 +457,7 @@ def create_collections(categories: List[Dict], product_counts: Dict[str, int]):
 
 def main():
     log("=" * 70)
-    log("JohnnyVac Automated Collection Creator v2")
+    log("JohnnyVac Automated Collection Creator v2.1")
     log("=" * 70)
     log("")
     
@@ -353,10 +466,38 @@ def main():
         log("❌ Error: SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN must be set")
         sys.exit(1)
     
+    log(f"Store: {SHOPIFY_STORE}")
+    log(f"API Version: {API_VERSION}")
+    
     if AUTO_PUBLISH:
         log("📢 AUTO_PUBLISH enabled - collections will be published")
     else:
         log("ℹ️  AUTO_PUBLISH disabled - collections will be created unpublished")
+    log("")
+    
+    # Test connection first
+    log("Testing API connection...")
+    test_query = '{ shop { name } }'
+    try:
+        response = requests.post(
+            GRAPHQL_URL,
+            headers=HEADERS,
+            json={"query": test_query},
+            timeout=10
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        if 'errors' in result:
+            log(f"❌ API Error: {result['errors']}")
+            sys.exit(1)
+        
+        shop_name = result.get('data', {}).get('shop', {}).get('name', 'Unknown')
+        log(f"✅ Connected to: {shop_name}")
+    except Exception as e:
+        log(f"❌ Connection failed: {e}")
+        sys.exit(1)
+    
     log("")
     
     # Load category taxonomy
