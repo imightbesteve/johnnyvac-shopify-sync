@@ -901,6 +901,9 @@ def try_bulk_create(products: List[Dict]) -> Tuple[bool, int]:
         resource_url = target['resourceUrl']
         params = {p['name']: p['value'] for p in target['parameters']}
         
+        # Get the 'key' parameter - THIS is what stagedUploadPath expects, not the full URL!
+        staged_path = params.get('key', resource_url)
+        
         # Upload file
         with open(jsonl_file, 'rb') as f:
             files = {'file': ('bulk_input.jsonl', f, 'text/jsonl')}
@@ -908,13 +911,14 @@ def try_bulk_create(products: List[Dict]) -> Tuple[bool, int]:
             upload_response.raise_for_status()
         
         log("✓ JSONL uploaded, starting bulk mutation...")
+        log(f"  Using staged path: {staged_path}")
         
         # Run bulk mutation with productSet
         bulk_mutation = f'''
         mutation {{
           bulkOperationRunMutation(
             mutation: "mutation call($input: ProductSetInput!, $synchronous: Boolean!) {{ productSet(input: $input, synchronous: $synchronous) {{ product {{ id }} userErrors {{ field message }} }} }}",
-            stagedUploadPath: "{resource_url}"
+            stagedUploadPath: "{staged_path}"
           ) {{
             bulkOperation {{ id status }}
             userErrors {{ field message }}
@@ -1009,6 +1013,9 @@ def try_bulk_update(products: List[Dict]) -> Tuple[bool, int]:
         resource_url = target['resourceUrl']
         params = {p['name']: p['value'] for p in target['parameters']}
         
+        # Get the 'key' parameter - THIS is what stagedUploadPath expects, not the full URL!
+        staged_path = params.get('key', resource_url)
+        
         # Upload file
         with open(jsonl_file, 'rb') as f:
             files = {'file': ('bulk_input.jsonl', f, 'text/jsonl')}
@@ -1016,13 +1023,14 @@ def try_bulk_update(products: List[Dict]) -> Tuple[bool, int]:
             upload_response.raise_for_status()
         
         log("✓ JSONL uploaded, starting bulk mutation...")
+        log(f"  Using staged path: {staged_path}")
         
         # Run bulk mutation with productUpdate
         bulk_mutation = f'''
         mutation {{
           bulkOperationRunMutation(
             mutation: "mutation call($input: ProductInput!) {{ productUpdate(input: $input) {{ product {{ id }} userErrors {{ field message }} }} }}",
-            stagedUploadPath: "{resource_url}"
+            stagedUploadPath: "{staged_path}"
           ) {{
             bulkOperation {{ id status }}
             userErrors {{ field message }}
