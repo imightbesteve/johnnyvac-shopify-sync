@@ -75,7 +75,8 @@ PRODUCT_PATTERNS = {
         r"\bglass\s+cleaner", r"\bfloor\s+cleaner", r"\bcleaning\s+solution",
         r"\bpolish\b(?!\s*brush)", r"\bsprayway\b", r"\bfabric\s+cleaner",
         r"\bleather\s+cleaner", r"\bvinyl\s+cleaner", r"\bneutral\s+cleaner",
-        r"\ball\s+purpose\s+cleaner",
+        r"\ball\s+purpose\s+cleaner", r"\blotion\b", r"\bantibacterial\b",
+        r"\bhand\s+soap", r"\bsoap\b",
     ],
     "wands": [
         r"\bwand[s]?\b", r"\btelescopic\b", r"\bextension\s+wand",
@@ -227,7 +228,26 @@ class SEOGenerator:
     def extract_brand(self, title, description=""):
         """Extract brand name from product title or description."""
         text = f"{title} {description}".lower()
+        
+        # Special handling for "Perfect" - only match if it looks like a brand reference
+        # (e.g., "Perfect vacuum", "Perfect C105", "Proteam / Perfect")
+        # NOT in phrases like "perfect for", "perfect cleaning"
+        if "perfect" in text:
+            # Check if it's actually the Perfect brand
+            perfect_brand_patterns = [
+                r"\bperfect\s+(vacuum|canister|upright|c\d+|pb\d+)",
+                r"\bproteam.*perfect",
+                r"\bperfect.*proteam",
+                r"for\s+perfect\s+\w+\s+vacuum",
+            ]
+            is_perfect_brand = any(re.search(p, text, re.IGNORECASE) for p in perfect_brand_patterns)
+            if is_perfect_brand:
+                return "Perfect"
+        
         for brand in BRANDS:
+            # Skip "Perfect" here since we handle it specially above
+            if brand.lower() == "perfect":
+                continue
             if brand.lower() in text:
                 return brand
         return None
@@ -292,9 +312,17 @@ class SEOGenerator:
         """Detect the product type/category using priority order."""
         text = f"{title} {description}".lower()
         
-        # FIRST: Check for definitive machine indicators (these should always win)
+        # FIRST: Check for bags/filters FOR central vacuums (not the vacuums themselves)
+        if re.search(r"\bbags?\s+for\s+central\s+vacuum", text, re.IGNORECASE):
+            return "bags"
+        if re.search(r"\bfilters?\s+for\s+central\s+vacuum", text, re.IGNORECASE):
+            return "filters"
+        if re.search(r"central\s+vacuum.*\bbags?\b", text, re.IGNORECASE):
+            return "bags"
+        
+        # SECOND: Check for definitive machine indicators (these should always win)
         machine_definitive = [
-            r"\bcentral\s+vacuum",
+            r"\bcentral\s+vacuum\b(?!.*\bbags?\b)",  # central vacuum but NOT if "bags" also present
             r"\bvacuum\s+cleaner\b",
             r"\bcommercial\s+vacuum\b",
             r"\bwet.*dry\b",
@@ -305,7 +333,7 @@ class SEOGenerator:
             if re.search(pattern, text, re.IGNORECASE):
                 return "machines"
         
-        # SECOND: Check for strong matches (2+ patterns) in priority order
+        # THIRD: Check for strong matches (2+ patterns) in priority order
         for category in PRODUCT_TYPE_PRIORITY:
             if category == "machines":  # Already checked above
                 continue
@@ -314,7 +342,7 @@ class SEOGenerator:
             if matches >= 2:  # Strong match
                 return category
         
-        # THIRD: Accept single matches in priority order
+        # FOURTH: Accept single matches in priority order
         for category in PRODUCT_TYPE_PRIORITY:
             if category == "machines":  # Already checked above
                 continue
@@ -432,8 +460,10 @@ class SEOGenerator:
         description = product.get("body_html", "") or ""
         sku = product.get("variants", [{}])[0].get("sku", "") if product.get("variants") else ""
         
-        brand = self.extract_brand(title, description)
-        product_type = self.detect_product_type(title, description)
+        # Use title only for brand/type detection (consistent with generate_seo_title)
+        # This prevents body_html from causing mismatches
+        brand = self.extract_brand(title)
+        product_type = self.detect_product_type(title)
         pack_qty = self.extract_pack_quantity(title)
         models = self.extract_model_number(title, sku)
         style_type = self.extract_style_type(title)
