@@ -41,57 +41,95 @@ BRANDS = [
 ]
 
 # Product type patterns for categorization - ORDERED BY PRIORITY
-# Bags first (most common), then other parts, machines last
+# More specific categories first to avoid false positives
 PRODUCT_TYPE_PRIORITY = [
-    "bags",        # Most common - check first
-    "filters",
-    "belts",
-    "brushes",
-    "hoses",
-    "cords",
-    "motors",
-    "wheels",
-    "wands",
-    "attachments",
-    "chemicals",
-    "machines",    # Check last - avoid misclassifying parts as machines
+    "machines",    # Central vacuums, extractors - check first
+    "chemicals",   # Cleaners, detergents - check early (avoid "cleaner" matching elsewhere)
+    "wands",       # Telescopic wands - specific
+    "hoses",       # Hoses - specific
+    "motors",      # Motors - specific
+    "bags",        # Most common replacement part
+    "filters",     # Common but check after bags
+    "brushes",     # Brush rolls, carbon brushes
+    "belts",       # Drive belts - check after brushes (both often in same products)
+    "cords",       # Power cords
+    "wheels",      # Wheels, casters
+    "attachments", # Generic attachments
     "parts",       # Fallback category
 ]
 
 PRODUCT_PATTERNS = {
-    "bags": [
-        r"\bbag[s]?\b", r"\bhepa\s+bag", r"\bmicrofilter\s+bag", r"\bpaper\s+bag",
-        r"\bvacuum\s+bag", r"\bdust\s+bag"
-    ],
-    "filters": [
-        r"\bfilter[s]?\b(?!\s*bag)", r"\bhepa\s+filter", r"\bmotor\s+filter", 
-        r"\bexhaust\s+filter", r"\bpre-?filter", r"\bpost-?filter"
-    ],
-    "belts": [r"\bbelt[s]?\b", r"\bdrive\s+belt", r"\bflat\s+belt", r"\bround\s+belt"],
-    "brushes": [
-        r"\bbrush(?:es|roll)?\b", r"\broller\s+brush", r"\bagitator", r"\bbeater\s+bar"
-    ],
-    "hoses": [r"\bhose[s]?\b", r"\bstretch\s+hose", r"\bextension\s+hose"],
-    "cords": [r"\bcord[s]?\b", r"\bpower\s+cord", r"\belectrical\s+cord"],
-    "motors": [r"\bmotor[s]?\b", r"\bsuction\s+motor", r"\bbrush\s+motor"],
-    "wheels": [r"\bwheel[s]?\b", r"\bcaster[s]?\b", r"\broller[s]?\b"],
-    "wands": [r"\bwand[s]?\b", r"\bextension\s+wand", r"\btelescopic"],
-    "attachments": [
-        r"\battachment[s]?\b", r"\btool[s]?\b", r"\bnozzle[s]?\b", r"\bcrevice",
-        r"\bupholstery", r"\bdusting\s+brush"
-    ],
-    "parts": [
-        r"\bpart[s]?\b", r"\breplacement", r"\bfitting[s]?\b", r"\badaptor",
-        r"\bconnector", r"\bcoupling", r"\blatch", r"\bswitch", r"\bhandle"
-    ],
     "machines": [
-        r"\bvacuum\s+cleaner", r"\bcanister\b(?!\s*bag)", r"\bupright\b(?!\s*bag)",
-        r"\bbackpack\b(?!\s*bag)", r"\bcommercial\s+vacuum", r"\bwet.*dry",
-        r"\bextractor", r"\bscrubber", r"\bsweeper", r"\bpolisher", r"\bburnisher"
+        r"\bcentral\s+vacuum",              # Central vacuums - check first!
+        r"\bvacuum\s+cleaner\b",
+        r"\bcanister\b(?!\s*(bag|filter))", # canister but not "canister bag/filter"
+        r"\bupright\b(?!\s*(bag|filter))",  # upright but not "upright bag"
+        r"\bbackpack\b(?!\s*(bag|filter))", # backpack but not "backpack bag"
+        r"\bcommercial\s+vacuum",
+        r"\bwet.*dry\b",
+        r"\bextractor\b(?!\s*bag)",
+        r"\bscrubber\b", r"\bsweeper\b", r"\bpolisher\b", r"\bburnisher\b"
     ],
     "chemicals": [
-        r"\bdetergent", r"\bcleaner\b", r"\bdegreaser", r"\bsanitizer",
-        r"\bdisinfectant", r"\bchemical"
+        r"\bdetergent\b", r"\bdegreaser\b", r"\bsanitizer\b", r"\bdisinfectant\b",
+        r"\bglass\s+cleaner", r"\bfloor\s+cleaner", r"\bcleaning\s+solution",
+        r"\bpolish\b(?!\s*brush)", r"\bsprayway\b", r"\bfabric\s+cleaner",
+        r"\bleather\s+cleaner", r"\bvinyl\s+cleaner", r"\bneutral\s+cleaner",
+        r"\ball\s+purpose\s+cleaner",
+    ],
+    "wands": [
+        r"\bwand[s]?\b", r"\btelescopic\b", r"\bextension\s+wand",
+        r"\btelescop\b",  # Handle typos like "telescop wand"
+    ],
+    "hoses": [
+        r"\bhose[s]?\b", r"\bstretch\s+hose", r"\bextension\s+hose", 
+        r"\bcrushproof\b"
+    ],
+    "motors": [
+        r"\bmotor\b(?!\s*filter)", r"\bsuction\s+motor", r"\bbrush\s+motor", 
+        r"\barmature\b", r"\btangential\s+vacuum\s+motor"
+    ],
+    "bags": [
+        r"\bvacuum\s+bag", r"\bdust\s+bag", r"\bpaper\s+bag",
+        r"\bhepa\s+bag", r"\bmicrofilter\s+bag",
+        r"\bbag[s]?\s+for\b",               # "bags for X vacuum"
+        r"\bpack\s+of\s+\d+\s+bag",         # "pack of 6 bags"
+        r"^bags?\s+hepa",                   # "BAGS HEPA" at start of title
+        r"\bbags?\b.*\bvacuum",             # "bags ... vacuum" anywhere
+    ],
+    "filters": [
+        r"\bmicrofilter\b(?!\s*bag)",       # microfilter but not "microfilter bag"
+        r"\bhepa\s+filter", r"\bmotor\s+filter", r"\bexhaust\s+filter",
+        r"\bpre-?filter\b", r"\bpost-?filter\b", r"\bfoam\s+filter",
+        r"\bfilter\b(?!\s*(bag|queen))",    # filter but not "filter bag" or "Filter Queen"
+    ],
+    "brushes": [
+        r"\bbrush\s*roll", r"\broller\s+brush", r"\bagitator\b", r"\bbeater\s+bar",
+        r"\bnylon\s+brush", r"\bcarbon\s+brush", r"\bcomplete\s+roller\s+brush",
+        r"\bbrush\b(?!\s*(motor|belt))",    # brush but not "brush motor" or "brush belt"
+    ],
+    "belts": [
+        r"\bdrive\s+belt", r"\bflat\s+belt", r"\bround\s+belt",
+        r"\bvacuum\s+belt", r"\breplacement\s+belt",
+        r"(?<!\w)belt[s]?(?!\s*(clip|brush))\b",  # belt but not "belt clip" or "belt brush"
+    ],
+    "cords": [
+        r"\bpower\s+cord", r"\belectrical\s+cord", 
+        r"\bcord\s+\d+[\'\"]\b",             # "cord 6'" 
+        r"\b\d+[\'\"]\s*cord\b",             # "6' cord"
+    ],
+    "wheels": [r"\bwheel[s]?\b", r"\bcaster[s]?\b"],
+    "attachments": [
+        r"\battachment[s]?\b", r"\bnozzle[s]?\b", r"\bcrevice\b",
+        r"\bupholstery\s+tool", r"\bdusting\s+brush",
+        r"\btool\s+kit\b", r"\bfloor\s+tool",
+    ],
+    "parts": [
+        r"\breplacement\b(?!\s*(belt|bag|filter|brush|motor))",
+        r"\bfitting[s]?\b", r"\badaptor\b", r"\bgasket\b",
+        r"\bconnector\b", r"\bcoupling\b", r"\blatch\b", r"\bswitch\b", 
+        r"\bhandle\b", r"\bpedal\b", r"\bvalve\b", r"\bdome\s+assembly",
+        r"\bsilencer\b", r"\bbearing\b",
     ]
 }
 
@@ -254,15 +292,32 @@ class SEOGenerator:
         """Detect the product type/category using priority order."""
         text = f"{title} {description}".lower()
         
-        # Check in priority order - first match with 2+ pattern hits wins
+        # FIRST: Check for definitive machine indicators (these should always win)
+        machine_definitive = [
+            r"\bcentral\s+vacuum",
+            r"\bvacuum\s+cleaner\b",
+            r"\bcommercial\s+vacuum\b",
+            r"\bwet.*dry\b",
+            r"\bextractor\b(?!\s*bag)",     # extractor but not "extractor bag"
+            r"\bscrubber\b", r"\bsweeper\b", r"\bpolisher\b", r"\bburnisher\b"
+        ]
+        for pattern in machine_definitive:
+            if re.search(pattern, text, re.IGNORECASE):
+                return "machines"
+        
+        # SECOND: Check for strong matches (2+ patterns) in priority order
         for category in PRODUCT_TYPE_PRIORITY:
+            if category == "machines":  # Already checked above
+                continue
             patterns = PRODUCT_PATTERNS.get(category, [])
             matches = sum(1 for p in patterns if re.search(p, text, re.IGNORECASE))
             if matches >= 2:  # Strong match
                 return category
         
-        # Second pass - accept single matches in priority order
+        # THIRD: Accept single matches in priority order
         for category in PRODUCT_TYPE_PRIORITY:
+            if category == "machines":  # Already checked above
+                continue
             patterns = PRODUCT_PATTERNS.get(category, [])
             for pattern in patterns:
                 if re.search(pattern, text, re.IGNORECASE):
@@ -352,8 +407,8 @@ class SEOGenerator:
         
         # If too short, add more context
         if len(seo_title) < 25:
-            # Try adding "Commercial" prefix or "| Replacement Part" suffix
-            if not brand:
+            # Try adding "Commercial" prefix (but avoid "Commercial Commercial...")
+            if not brand and not seo_title.lower().startswith("commercial"):
                 seo_title = f"Commercial {seo_title}"
             if len(seo_title) < 25:
                 seo_title = f"{seo_title} | Vacuum Part"
@@ -386,14 +441,16 @@ class SEOGenerator:
         category_info = CATEGORY_SEO.get(product_type, CATEGORY_SEO["parts"])
         
         # Build description components
-        parts = []
-        
-        # Opening - brand and product type with model/style
         opener = ""
         if brand:
             opener = f"{brand} {category_info['suffix'].lower()}"
         else:
-            opener = f"Commercial {category_info['suffix'].lower()}"
+            # Avoid "Commercial commercial vacuum" - check if suffix starts with "commercial"
+            suffix_lower = category_info['suffix'].lower()
+            if suffix_lower.startswith("commercial"):
+                opener = category_info['suffix']  # Use as-is, capitalized
+            else:
+                opener = f"Commercial {suffix_lower}"
         
         # Add style/type or model if found
         if style_type:
@@ -401,13 +458,13 @@ class SEOGenerator:
         elif models:
             opener = f"{opener} ({models[0]})"
         
-        parts.append(opener)
+        parts = [opener]
         
         # Add pack quantity
         if pack_qty and pack_qty > 1:
             parts.append(f"Pack of {pack_qty}")
         
-        # Add quality descriptor
+        # Add quality descriptor - use the one matching the product type
         parts.append(category_info["descriptors"][0].capitalize())
         
         # Canadian shipping CTAs - varied options
@@ -418,12 +475,13 @@ class SEOGenerator:
             "Professional grade. Ships across Canada."
         ]
         
-        # JohnnyVac compatibility note
+        # JohnnyVac compatibility note - only for parts, not for JV machines
         jv_note = ""
-        if brand and "johnny" in brand.lower():
-            jv_note = "JohnnyVac compatible. "
-        elif "johnny" in title.lower() or "jv" in title.lower():
-            jv_note = "JohnnyVac compatible. "
+        if product_type not in ["machines", "chemicals"]:
+            if brand and "johnny" in brand.lower():
+                jv_note = "JohnnyVac compatible. "
+            elif "johnny" in title.lower() or "jvac" in title.lower():
+                jv_note = "JohnnyVac compatible. "
         
         # Combine parts
         main_text = ". ".join(parts) + "."
@@ -449,7 +507,7 @@ class SEOGenerator:
             if brand:
                 short_text = f"{brand} {category_info['suffix'].lower()}."
             else:
-                short_text = f"Commercial {category_info['suffix'].lower()}."
+                short_text = f"{category_info['suffix']}."
             
             if pack_qty and pack_qty > 1:
                 short_text += f" {pack_qty} pack."
