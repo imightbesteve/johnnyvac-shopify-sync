@@ -1,0 +1,68 @@
+name: Generate SEO Metadata
+
+on:
+  workflow_dispatch:  # Manual trigger only - run when you want
+    inputs:
+      dry_run:
+        description: 'Dry run (preview only, no changes)'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      limit:
+        description: 'Limit products (leave empty for all)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  generate-seo:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Run SEO Generator
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+        run: |
+          ARGS="--export seo_results.csv"
+          
+          if [ "${{ inputs.dry_run }}" == "true" ]; then
+            ARGS="$ARGS --dry-run"
+            echo "🔍 Running in DRY RUN mode (no changes will be made)"
+          else
+            echo "⚡ Running in LIVE mode (products will be updated)"
+          fi
+          
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+            echo "📊 Limited to ${{ inputs.limit }} products"
+          fi
+          
+          echo "Running: python3 seo_generator.py $ARGS"
+          python3 seo_generator.py $ARGS
+      
+      - name: Upload results CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: seo-results-${{ github.run_number }}
+          path: seo_results.csv
+          retention-days: 30
+      
+      - name: Show sample results
+        run: |
+          echo "📋 First 20 rows of results:"
+          head -21 seo_results.csv | column -t -s,
