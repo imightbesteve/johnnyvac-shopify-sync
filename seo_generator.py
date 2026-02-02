@@ -312,39 +312,47 @@ class SEOGenerator:
         """Detect the product type/category using priority order."""
         text = f"{title} {description}".lower()
         
-        # FIRST: Check for bags/filters FOR central vacuums (not the vacuums themselves)
-        if re.search(r"\bbags?\s+for\s+central\s+vacuum", text, re.IGNORECASE):
+        # FIRST: Check for hoses (including central vacuum hoses)
+        if re.search(r"\bhose[s]?\b", text, re.IGNORECASE):
+            # This is a hose product, not a machine
+            return "hoses"
+        
+        # SECOND: Check for bags FOR central vacuums (not central vacuums with bag features)
+        # Pattern: "bags for central" or "bags ... central vacuum cleaner" (bags comes first)
+        if re.search(r"\bbags?\s+(for\s+)?central\s+vacuum", text, re.IGNORECASE):
             return "bags"
-        if re.search(r"\bfilters?\s+for\s+central\s+vacuum", text, re.IGNORECASE):
-            return "filters"
-        if re.search(r"central\s+vacuum.*\bbags?\b", text, re.IGNORECASE):
+        if re.search(r"\bbags?\s+for\s+.*\bcentral\b", text, re.IGNORECASE):
             return "bags"
         
-        # SECOND: Check for definitive machine indicators (these should always win)
+        # THIRD: Check for definitive machine indicators
         machine_definitive = [
-            r"\bcentral\s+vacuum\b(?!.*\bbags?\b)",  # central vacuum but NOT if "bags" also present
+            r"\bcentral\s+vacuum\b",            # central vacuum (machine)
             r"\bvacuum\s+cleaner\b",
             r"\bcommercial\s+vacuum\b",
             r"\bwet.*dry\b",
-            r"\bextractor\b(?!\s*bag)",     # extractor but not "extractor bag"
+            r"\bextractor\b(?!\s*bag)",          # extractor but not "extractor bag"
             r"\bscrubber\b", r"\bsweeper\b", r"\bpolisher\b", r"\bburnisher\b"
         ]
         for pattern in machine_definitive:
             if re.search(pattern, text, re.IGNORECASE):
                 return "machines"
         
-        # THIRD: Check for strong matches (2+ patterns) in priority order
+        # FOURTH: Check for strong matches (2+ patterns) in priority order
         for category in PRODUCT_TYPE_PRIORITY:
             if category == "machines":  # Already checked above
+                continue
+            if category == "hoses":  # Already checked above
                 continue
             patterns = PRODUCT_PATTERNS.get(category, [])
             matches = sum(1 for p in patterns if re.search(p, text, re.IGNORECASE))
             if matches >= 2:  # Strong match
                 return category
         
-        # FOURTH: Accept single matches in priority order
+        # FIFTH: Accept single matches in priority order
         for category in PRODUCT_TYPE_PRIORITY:
             if category == "machines":  # Already checked above
+                continue
+            if category == "hoses":  # Already checked above
                 continue
             patterns = PRODUCT_PATTERNS.get(category, [])
             for pattern in patterns:
