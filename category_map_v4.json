@@ -1,13 +1,16 @@
 {
   "settings": {
-    "version": "4.1",
-    "description": "Category map v4.1 — Added missing vacuum equipment categories",
+    "version": "4.2",
+    "description": "Category map v4.2 — Added missing keywords from needs_review analysis, fixed Equipment trailing space, lowered Safety min_products",
     "notes": [
       "1. First try to map using JohnnyVac's ProductCategory field (jv_category_mappings)",
       "2. If JV category is generic (All Parts, Johnny Vac Parts), use keyword matching",
       "3. Keyword matching goes through categories in priority order (high to low)",
       "4. Global part keywords are checked LAST as a fallback before 'Needs Review'",
-      "5. SKU/model noise is stripped before keyword matching"
+      "5. SKU/model noise is stripped before keyword matching",
+      "6. v4.2: Added ~20 missing keywords identified from needs_review.csv analysis",
+      "7. v4.2: Added 'Commercial Vacuums and Equipment' (no trailing space) to jv_category_mappings",
+      "8. v4.2: Lowered Safety & PPE min_products from 2 to 1"
     ],
     "skip_patterns": {
       "description": "Products matching these patterns should be skipped entirely",
@@ -17,7 +20,11 @@
         "demo",
         "discontinued",
         "do not order",
-        "call for price"
+        "call for price",
+        "catalog",
+        "catalogue",
+        "users guide",
+        "user guide"
       ],
       "title_patterns_fr": [
         "cette pièce est rarement commandée",
@@ -37,14 +44,23 @@
       "pump", "regulator", "shurflo", "oring", "o-ring", "cuff", "elbow", "assembly", "assy",
       "motor", "cord", "plug", "pigtail", "terminal", "pcb", "circuit", "relay", "plate", "housing",
       "bumper", "inlet", "outlet", "valve", "adapter", "adaptor", "coupling", "repair kit",
-      "conversion kit", "service kit", "bearing", "spring", "wheel", "caster", "switch", 
-      "cover", "seal", "gasket", "part", "replacement"
+      "conversion kit", "service kit", "bearing", "spring", "wheel", "caster", "switch",
+      "cover", "seal", "gasket", "part", "replacement",
+      "fan", "brush", "cap", "float", "bushing", "rod", "strip", "grille", "cyclone",
+      "muffler", "diverter", "bellows", "roller", "grip", "receiver", "strain relief",
+      "spray bar", "spray tip", "spray trigger", "dirt cup", "dust cup",
+      "dust compartment", "pick up tool", "push rod",
+      "tool", "pad", "screen", "lint screen", "shaft", "pulley", "caddy", "key",
+      "actuator", "driver", "guard", "glide", "bladder", "magnet", "strap",
+      "neon lamp", "lamp", "separator", "measuring cup", "bag holder",
+      "autoscrubber", "autoscrubbers",
+      "pads", "felt", "lens", "gear", "passage", "collar"
     ]
   },
 
   "jv_category_mappings": {
     "_description": "Maps JohnnyVac ProductCategory values to Shopify productType. null = use keyword matching",
-    
+
     "Vacuum Bags": {
       "productType": "Parts & Replacement Parts > Vacuum Bags",
       "handle": "parts-vacuum-bags",
@@ -215,6 +231,11 @@
       "handle": "equipment-commercial-vacuums",
       "confidence": "high"
     },
+    "Commercial Vacuums and Equipment": {
+      "productType": "Equipment & Machines > Commercial Vacuums",
+      "handle": "equipment-commercial-vacuums",
+      "confidence": "high"
+    },
     "Central Vacuums": {
       "productType": "Equipment & Machines > Central Vacuums",
       "handle": "equipment-central-vacuums",
@@ -250,7 +271,11 @@
       "handle": "parts-wheels-casters",
       "confidence": "medium"
     },
-    
+    "Tools, Bearings": {
+      "productType": "Parts & Replacement Parts > Wheels & Casters",
+      "handle": "parts-wheels-casters",
+      "confidence": "medium"
+    },
     "Carpet Products": {
       "productType": "Consumables > Chemicals & Solutions",
       "handle": "consumables-chemicals-solutions",
@@ -326,7 +351,6 @@
       "handle": "equipment-carpet-extractors",
       "confidence": "high"
     },
-    
     "Stick Vacuums": {
       "productType": "Equipment & Machines > Commercial Vacuums",
       "handle": "equipment-commercial-vacuums",
@@ -362,7 +386,7 @@
       "handle": "equipment-commercial-vacuums",
       "confidence": "medium"
     },
-    
+
     "Johnny Vac Parts (*)": null,
     "All Parts": null,
     "Promotional products": null,
@@ -385,13 +409,15 @@
         "on/off switch", "power switch", "rocker switch", "toggle switch", "capacitor",
         "transformer", "solenoid", "electrical", "amp", "volt", "watt",
         "battery", "charger", "fan rotating", "fan stationary", "heater", "field coil",
-        "cable", "wiring", "electric", "electrode"
+        "cable", "wiring", "electric", "electrode",
+        "fan", "cooling fan", "separator fan", "fan chamber", "fan complete",
+        "microswitch", "light bulb", "fuse"
       ],
       "keywords_fr": [
         "moteur", "cordon", "prise", "fil électrique", "carte", "circuit", "relais", "interrupteur",
-        "électrique", "câble"
+        "électrique", "câble", "ventilateur", "fusible"
       ],
-      "exclusions_en": [],
+      "exclusions_en": ["fan pulley"],
       "exclusions_fr": [],
       "min_products": 1
     },
@@ -417,7 +443,7 @@
       "title": "Hoses & Fittings",
       "priority": 100,
       "keywords_en": [
-        "hose", "vacuum hose", "boyau", "cuff", "hose cuff", "elbow", "fitting", "adapter", 
+        "hose", "vacuum hose", "boyau", "cuff", "hose cuff", "elbow", "fitting", "adapter",
         "coupling", "hose repair", "hose kit", "inlet", "outlet", "connector", "nipple",
         "barb", "quick disconnect", "hose end", "hose adaptor", "extension hose", "tube",
         "tubing", "duct", "pipe"
@@ -435,7 +461,8 @@
       "priority": 100,
       "keywords_en": [
         "filter", "hepa", "filtration", "filter bag", "cartridge filter", "dacron", "gortex", "sms",
-        "exhaust filter", "air filter", "pre-filter", "foam filter", "washable filter", "ulpa", "foam"
+        "exhaust filter", "air filter", "pre-filter", "foam filter", "washable filter", "ulpa", "foam",
+        "circular filter"
       ],
       "keywords_fr": ["filtre", "hepa", "cartouche", "dacron", "gortex", "filtration"],
       "exclusions_en": ["bag hepa", "hepa bag", "sac hepa"],
@@ -449,12 +476,13 @@
       "title": "Vacuum Bags",
       "priority": 100,
       "keywords_en": [
-        "vacuum bag", "cloth bag", "dust bag", "sac", "bag hepa", "hepa bag", "bag cloth", 
+        "vacuum bag", "cloth bag", "dust bag", "sac", "bag hepa", "hepa bag", "bag cloth",
         "paper bag", "disposable bag", "reusable bag", "microfilter bag", "pack of bags",
-        "bags -", "pk5", "pk6", "pk10", "paq", "bag style", "bag pk", "bag type"
+        "bags -", "pk5", "pk6", "pk10", "paq", "bag style", "bag pk", "bag type",
+        "s bag", "bag holder", "bags for", "bag"
       ],
       "keywords_fr": ["sac", "sac d'aspirateur", "sac tissu", "sac en papier", "sac microfiltre", "paquet de"],
-      "exclusions_en": ["garbage bag", "trash bag"],
+      "exclusions_en": ["garbage bag", "trash bag", "bag holder"],
       "exclusions_fr": ["sac à ordures", "sac poubelle"],
       "min_products": 1
     },
@@ -465,7 +493,7 @@
       "title": "Belts & Drive Belts",
       "priority": 100,
       "keywords_en": [
-        "belt", "drive belt", "v-belt", "agitator belt", "replacement belt", 
+        "belt", "drive belt", "v-belt", "agitator belt", "replacement belt",
         "flat belt", "geared belt", "cogged belt", "vacuum belt"
       ],
       "keywords_fr": ["courroie"],
@@ -480,9 +508,10 @@
       "title": "Seals & Gaskets",
       "priority": 100,
       "keywords_en": [
-        "seal", "gasket", "o-ring", "oring", "grommet", "rubber seal", "valve seal"
+        "seal", "gasket", "o-ring", "oring", "grommet", "rubber seal", "valve seal",
+        "bellows"
       ],
-      "keywords_fr": ["joint", "joints", "o-ring"],
+      "keywords_fr": ["joint", "joints", "o-ring", "soufflet"],
       "exclusions_en": [],
       "exclusions_fr": [],
       "min_products": 1
@@ -496,10 +525,13 @@
       "keywords_en": [
         "brush roll", "agitator", "brush assembly", "beater bar", "roller brush",
         "scrub brush", "brush strip", "brush block", "end cap", "rotating brush",
-        "power brush", "turbo brush"
+        "power brush", "turbo brush",
+        "brush", "turbobrush", "floor brush", "detail brush", "neck brush",
+        "grout brush", "brush tool", "dust brush", "bristle strip",
+        "brush window", "brush card", "hair strip"
       ],
-      "keywords_fr": ["brosse rotative", "agitateur", "brosse motorisée"],
-      "exclusions_en": ["broom", "hand brush", "dustpan"],
+      "keywords_fr": ["brosse rotative", "agitateur", "brosse motorisée", "brosse", "poil de rechange"],
+      "exclusions_en": ["broom", "dustpan"],
       "exclusions_fr": ["balai"],
       "min_products": 1
     },
@@ -512,9 +544,11 @@
       "keywords_en": [
         "nozzle", "wand", "extension wand", "floor nozzle", "crevice tool", "crevice took",
         "upholstery tool", "dusting brush", "power nozzle", "floor tool",
-        "telescopic wand", "curved wand", "straight wand", "attachment tool", "vacuum tool"
+        "telescopic wand", "curved wand", "straight wand", "attachment tool", "vacuum tool",
+        "telescopic", "crevice", "combo tool", "pick up tool", "stair tool",
+        "wall hanger"
       ],
-      "keywords_fr": ["buse", "suceur", "tube", "rallonge", "embout"],
+      "keywords_fr": ["buse", "suceur", "tube", "rallonge", "embout", "support mural"],
       "exclusions_en": [],
       "exclusions_fr": [],
       "min_products": 1
@@ -526,13 +560,18 @@
       "title": "Assemblies & Housings",
       "priority": 95,
       "keywords_en": [
-        "assembly", "assy", "assembly complete", "housing", "cover", "body", "panel", 
+        "assembly", "assy", "assembly complete", "housing", "cover", "body", "panel",
         "chassis", "carriage", "handle", "lid", "base", "shell", "case", "tank",
         "holder", "lever", "pedal", "knob", "button", "bracket", "door", "adjustment",
-        "frame", "support", "mount", "rack", "tray", "bin", "container"
+        "frame", "support", "mount", "rack", "tray", "bin", "container",
+        "dirt cup", "dust cup", "dust compartment", "cyclone", "inner cyclone",
+        "grille", "grille cap", "cap", "diverter", "separator stack",
+        "swivel arm", "autoload receiver", "receiver", "window",
+        "potentiometre", "indicator", "air bleeder", "remote"
       ],
-      "keywords_fr": ["assemblage", "boîtier", "couvercle", "réservoir"],
-      "exclusions_en": [],
+      "keywords_fr": ["assemblage", "boîtier", "couvercle", "réservoir", "récipient", "indicateur",
+        "régulateur d'air"],
+      "exclusions_en": ["end cap", "brush cap", "carbon brush", "cap screw"],
       "exclusions_fr": [],
       "min_products": 1
     },
@@ -562,7 +601,7 @@
         "swivel caster", "tire"
       ],
       "keywords_fr": ["roue", "roulette", "palier"],
-      "exclusions_en": [],
+      "exclusions_en": ["brush roll", "roller brush"],
       "exclusions_fr": [],
       "min_products": 1
     },
@@ -573,8 +612,8 @@
       "title": "Latches & Clips",
       "priority": 90,
       "keywords_en": [
-        "latch", "clip", "clamp", "buckle", "fastener", "retainer", "lock", 
-        "catch", "release button", "snap"
+        "latch", "clip", "clamp", "buckle", "fastener", "retainer", "lock",
+        "catch", "release button", "snap", "e-ring", "ering", "e ring"
       ],
       "keywords_fr": ["loquet", "agrafe", "attache"],
       "exclusions_en": [],
@@ -588,10 +627,11 @@
       "title": "Springs & Hardware",
       "priority": 90,
       "keywords_en": [
-        "spring", "screw", "bolt", "nut", "washer", "pin", "rivet", "hardware"
+        "spring", "screw", "bolt", "nut", "washer", "pin", "rivet", "hardware",
+        "bushing", "muffler", "sound muffler", "felt pad"
       ],
-      "keywords_fr": ["ressort", "vis", "boulon"],
-      "exclusions_en": [],
+      "keywords_fr": ["ressort", "vis", "boulon", "bague", "silencieux", "tampon feutre"],
+      "exclusions_en": ["pressure washer", "power washer"],
       "exclusions_fr": [],
       "min_products": 1
     },
@@ -649,7 +689,7 @@
       "title": "Floor Pads & Accessories",
       "priority": 75,
       "keywords_en": [
-        "floor pad", "buffing pad", "scrubbing pad", "stripping pad", "polishing pad", 
+        "floor pad", "buffing pad", "scrubbing pad", "stripping pad", "polishing pad",
         "microfiber pad", "cleaning pad", "burnishing pad", "red pad", "black pad",
         "green pad", "blue pad", "white pad"
       ],
@@ -721,12 +761,12 @@
       ],
       "keywords_fr": ["aspirateur vertical"],
       "exclusions_en": [
-        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
-        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord",
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with",
         "replacement", "part", "brush roll", "nozzle", "wand", "pack of", "wheel", "caster"
       ],
       "exclusions_fr": [
-        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon",
         "prise", "remplacement", "pièce", "paquet de"
       ],
       "min_products": 1
@@ -742,12 +782,12 @@
       ],
       "keywords_fr": ["aspirateur sac à dos"],
       "exclusions_en": [
-        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
-        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord",
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with",
         "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
       ],
       "exclusions_fr": [
-        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon",
         "prise", "remplacement", "pièce", "paquet de"
       ],
       "min_products": 1
@@ -763,12 +803,12 @@
       ],
       "keywords_fr": ["aspirateur traîneau"],
       "exclusions_en": [
-        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
-        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord",
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with",
         "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
       ],
       "exclusions_fr": [
-        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon",
         "prise", "remplacement", "pièce", "paquet de"
       ],
       "min_products": 1
@@ -784,12 +824,12 @@
       ],
       "keywords_fr": ["aspirateur eau et poussière", "aspirateur sec et humide"],
       "exclusions_en": [
-        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
-        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord",
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with",
         "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
       ],
       "exclusions_fr": [
-        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon",
         "prise", "remplacement", "pièce", "paquet de"
       ],
       "min_products": 1
@@ -805,12 +845,12 @@
       ],
       "keywords_fr": ["aspirateur hepa"],
       "exclusions_en": [
-        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
-        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord",
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with",
         "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
       ],
       "exclusions_fr": [
-        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon",
         "prise", "remplacement", "pièce", "paquet de"
       ],
       "min_products": 1
@@ -826,12 +866,12 @@
       ],
       "keywords_fr": ["aspirateur commercial"],
       "exclusions_en": [
-        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord", 
-        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with", 
+        "filter", "bag", "belt", "hose", "motor", "assembly", "assy", "repair kit", "cord",
+        "plug", "pigtail", "pcb", "circuit", "relay", "adapter", "coupling", "for use with",
         "replacement", "part", "brush roll", "nozzle", "wand", "pack of"
       ],
       "exclusions_fr": [
-        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon", 
+        "filtre", "sac", "courroie", "boyau", "moteur", "assemblage", "kit", "cordon",
         "prise", "remplacement", "pièce", "paquet de"
       ],
       "min_products": 2
@@ -936,12 +976,13 @@
       "priority": 60,
       "keywords_en": [
         "mask", "respirator", "safety glasses", "ppe", "floor sign", "spill kit",
-        "caution sign", "wet floor sign", "ear protection", "safety vest", "goggles"
+        "caution sign", "wet floor sign", "ear protection", "safety vest", "goggles",
+        "kn95", "n95"
       ],
       "keywords_fr": ["masque", "protection", "lunettes"],
       "exclusions_en": [],
       "exclusions_fr": [],
-      "min_products": 2
+      "min_products": 1
     },
 
     {
