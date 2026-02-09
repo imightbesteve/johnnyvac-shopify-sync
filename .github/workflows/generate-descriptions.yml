@@ -1,0 +1,105 @@
+name: Generate Product Descriptions
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: true
+        default: 'dry-run'
+        type: choice
+        options:
+          - 'dry-run'
+          - 'live'
+      limit:
+        description: 'Limit products (leave empty for all)'
+        required: false
+        default: ''
+        type: string
+      min_length:
+        description: 'Min description length threshold (chars)'
+        required: false
+        default: '80'
+        type: string
+
+jobs:
+  generate-descriptions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Description Generator
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+        run: |
+          ARGS="--export description_results.csv --samples 15"
+
+          if [ "${{ inputs.mode }}" == "live" ]; then
+            ARGS="$ARGS --live"
+            echo "⚡ Running in LIVE mode — descriptions will be updated"
+          else
+            echo "🔍 Running in DRY RUN mode — preview only"
+          fi
+
+          if [ -n "${{ inputs.min_length }}" ]; then
+            ARGS="$ARGS --min-length ${{ inputs.min_length }}"
+          fi
+
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+            echo "📊 Limited to ${{ inputs.limit }} products"
+          fi
+
+          echo "Running: python3 description_generator.py $ARGS"
+          python3 description_generator.py $ARGS
+
+      - name: Upload results CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: description-results-${{ github.run_number }}
+          path: description_results.csv
+          retention-days: 30
+
+      - name: Show sample results
+        if: always()
+        run: |
+          if [ -f description_results.csv ]; then
+            echo "📋 Results summary:"
+            echo "Total rows: $(wc -l < description_results.csv)"
+            echo ""
+            echo "First 10 rows:"
+            head -11 description_results.csv | column -t -s,
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Product Description Generator Results"
+            echo ""
+            echo "### Configuration"
+            echo "- Mode: ${{ inputs.mode }}"
+            echo "- Min length threshold: ${{ inputs.min_length || '80' }} chars"
+            if [ -n "${{ inputs.limit }}" ]; then
+              echo "- Limit: ${{ inputs.limit }} products"
+            fi
+            echo ""
+            echo "### Output"
+            echo "- 📄 description_results.csv uploaded as artifact"
+            echo ""
+            echo "### Timestamp"
+            echo "- ⏰ $(date -u)"
+          } >> $GITHUB_STEP_SUMMARY
