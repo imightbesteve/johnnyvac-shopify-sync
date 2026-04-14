@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 # sync_shopify_v3.py
 """
-JohnnyVac to Shopify Sync v3.3 - FIXED FOR API 2026-01
+JohnnyVac to Shopify Sync v3.4 - MPN METAFIELD SUPPORT
+
+CHANGES from v3.3:
+- Added MPN (Manufacturer Part Number) metafield using JohnnyVac SKU
+- Google accepts Brand + MPN as GTIN alternative for products without barcodes
+- Metafield added to: productSet, productCreate, productUpdate, and both bulk ops
 
 BREAKING CHANGE FIX: Shopify API 2024-01+ removed 'variants' and 'images' 
 from ProductInput. This version uses:
@@ -151,6 +156,26 @@ def normalize_price(price_str: str) -> str:
         return f"{float(price_str):.2f}"
     except (ValueError, TypeError):
         return "0.00"
+
+# =============================================================================
+# MPN METAFIELD HELPER  — NEW in v3.4
+# =============================================================================
+
+def build_metafields(sku: str) -> List[Dict]:
+    """
+    Build metafields array for a product.
+    Sets the JohnnyVac SKU as the MPN (Manufacturer Part Number).
+    Google accepts Brand + MPN as an alternative to GTIN/barcode.
+    """
+    metafields = []
+    if sku:
+        metafields.append({
+            "namespace": "custom",
+            "key": "mpn",
+            "value": sku,
+            "type": "single_line_text_field"
+        })
+    return metafields
 
 # =============================================================================
 # CSV FETCHING
@@ -561,6 +586,7 @@ def create_product(product_data: Dict) -> Optional[str]:
             "vendor": "JohnnyVac",
             "status": status,
             "tags": tags,
+            "metafields": build_metafields(sku),  # MPN CHANGE
             "productOptions": [
                 {"name": "Title", "values": [{"name": "Default Title"}]}
             ],
@@ -645,7 +671,8 @@ def create_product_simple(product_data: Dict) -> Optional[str]:
             "productType": product_type,
             "vendor": "JohnnyVac",
             "status": status,
-            "tags": tags
+            "tags": tags,
+            "metafields": build_metafields(sku)  # MPN CHANGE
         },
         "media": [{
             "originalSource": f"{IMAGE_BASE_URL}{sku}.jpg",
@@ -734,7 +761,6 @@ def update_product(product_data: Dict) -> bool:
     ]
     
     # Step 1: Update product-level fields
-    # Note: API 2024-01+ uses 'product' parameter (ProductUpdateInput), not 'input' (ProductInput)
     product_mutation = """
     mutation productUpdate($input: ProductInput!) {
         productUpdate(input: $input) {
@@ -756,7 +782,8 @@ def update_product(product_data: Dict) -> bool:
             "descriptionHtml": description,
             "productType": product_type,
             "tags": tags,
-            "status": status
+            "status": status,
+            "metafields": build_metafields(sku)  # MPN CHANGE
         }
     }
     
@@ -861,6 +888,7 @@ def try_bulk_create(products: List[Dict]) -> Tuple[bool, int]:
                     "vendor": "JohnnyVac",
                     "status": status,
                     "tags": tags,
+                    "metafields": build_metafields(sku),  # MPN CHANGE
                     "productOptions": [{"name": "Title", "values": [{"name": "Default Title"}]}],
                     "variants": [variant_input],
                     "files": [{"originalSource": f"{IMAGE_BASE_URL}{sku}.jpg", "contentType": "IMAGE"}]
@@ -956,6 +984,7 @@ def try_bulk_update(products: List[Dict]) -> Tuple[bool, int]:
         for product in products:
             existing = product.get('_existing', {})
             category_info = product.get('category', {})
+            sku = product.get('SKU', '')
             
             title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
             description = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
@@ -976,7 +1005,8 @@ def try_bulk_update(products: List[Dict]) -> Tuple[bool, int]:
                     "descriptionHtml": description,
                     "productType": product_type,
                     "tags": tags,
-                    "status": status
+                    "status": status,
+                    "metafields": build_metafields(sku)  # MPN CHANGE
                 }
             }
             f.write(json.dumps(mutation_input) + '\n')
@@ -1192,9 +1222,10 @@ def main():
     start_time = time.time()
     
     log("=" * 70)
-    log("JohnnyVac to Shopify Sync v3.3 - FIXED FOR API 2026-01")
+    log("JohnnyVac to Shopify Sync v3.4 - MPN METAFIELD SUPPORT")
     log("=" * 70)
     log("Using productSet for creates, productUpdate+productVariantsBulkUpdate for updates")
+    log("MPN metafield (custom.mpn) set from JohnnyVac SKU on all products")
     
     if DRY_RUN:
         log("🔸 DRY RUN MODE - No changes will be made", 'WARNING')
@@ -1293,6 +1324,7 @@ def main():
     log(f"\nPerformance:")
     log(f"  Fetch existing: {fetch_time:.1f}s (bulk query)")
     log(f"  Sync operations: {sync_time:.1f}s")
+    log(f"\nMPN metafield: custom.mpn set from JohnnyVac SKU on all synced products")
     
     if DRY_RUN:
         log("\n🔸 DRY RUN - No actual changes were made")
