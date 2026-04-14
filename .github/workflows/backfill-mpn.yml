@@ -1,0 +1,53 @@
+name: Backfill MPN Metafield
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: true
+        default: 'dry-run'
+        type: choice
+        options:
+          - 'dry-run'
+          - 'live'
+
+jobs:
+  backfill-mpn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run MPN Backfill
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+        run: |
+          if [ "${{ inputs.mode }}" == "live" ]; then
+            echo "⚡ Running in LIVE mode"
+            python backfill_mpn.py --live
+          else
+            echo "🔍 Running in DRY RUN mode"
+            python backfill_mpn.py --dry-run
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## MPN Metafield Backfill"
+            echo ""
+            echo "- Mode: ${{ inputs.mode }}"
+            echo "- ⏰ $(date -u)"
+          } >> $GITHUB_STEP_SUMMARY
