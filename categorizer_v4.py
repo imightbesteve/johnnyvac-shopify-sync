@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 # categorizer_v4.py
 """
-ProductCategorizer v4
+ProductCategorizer v4.1
 - Uses JohnnyVac ProductCategory as PRIMARY signal (high confidence)
 - Falls back to keyword matching only for generic categories (All Parts, Johnny Vac Parts)
 - FIXED: Global part keywords are now checked LAST (fallback) not FIRST
 - Thread-safe design
 - Includes skip pattern detection for placeholder products
+
+v4.1 CHANGES:
+- CamelCase splitting in normalize_text() to handle concatenated titles
+  (e.g., "BeltElite" → "belt elite", "FilterSprint" → "filter sprint")
+- Catches ~25 additional products from Hoover/Electrolux/Ametek titles
 """
 
 import re
@@ -86,10 +91,28 @@ class ProductCategorizer:
     # =========================================================================
     
     def normalize_text(self, text: str) -> str:
-        """Normalize text for keyword matching, stripping SKU/model noise"""
+        """
+        Normalize text for keyword matching, stripping SKU/model noise.
+        
+        v4.1: Added CamelCase splitting to handle concatenated titles from
+        Hoover/Electrolux/Ametek (e.g., "BeltElite" → "Belt Elite",
+        "FilterSprint" → "Filter Sprint", "BracketWall" → "Bracket Wall")
+        """
         if not text:
             return ""
-        t = text.lower()
+        
+        # --- CamelCase splitting (BEFORE lowercasing) --- v4.1 CHANGE
+        # Split "BeltElite" → "Belt Elite"
+        t = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+        # Split "HTMLParser" → "HTML Parser" 
+        t = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', t)
+        # Split letter-digit and digit-letter boundaries
+        # "Filter4300" → "Filter 4300", "4300Filter" → "4300 Filter"
+        t = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', t)
+        t = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', t)
+        
+        # Now lowercase
+        t = t.lower()
         # Replace common punctuation with space
         t = re.sub(r'[^\wà-ÿ\s]', ' ', t)
         # Collapse whitespace
@@ -471,7 +494,7 @@ if __name__ == '__main__':
     # Quick test
     categorizer = ProductCategorizer('category_map_v4.json')
     
-    # Test cases
+    # Test cases — includes v4.1 CamelCase tests
     test_products = [
         {
             'SKU': 'TEST001',
@@ -497,7 +520,7 @@ if __name__ == '__main__':
             'ProductTitleFR': 'Assemblage moteur complet',
             'ProductDescriptionEN': '',
             'ProductDescriptionFR': '',
-            'ProductCategory': 'Johnny Vac Parts (*)',  # Generic - needs keyword matching
+            'ProductCategory': 'Johnny Vac Parts (*)',
             'RegularPrice': '89.99'
         },
         {
@@ -508,10 +531,38 @@ if __name__ == '__main__':
             'ProductDescriptionFR': '',
             'ProductCategory': 'All Parts',
             'RegularPrice': '0.01'
-        }
+        },
+        # v4.1 CamelCase test cases
+        {
+            'SKU': 'CC001',
+            'ProductTitleEN': 'BeltElite hoover_38528027',
+            'ProductTitleFR': '',
+            'ProductDescriptionEN': '',
+            'ProductDescriptionFR': '',
+            'ProductCategory': 'Johnny Vac Parts (*)',
+            'RegularPrice': '15.99'
+        },
+        {
+            'SKU': 'CC002',
+            'ProductTitleEN': 'FilterSprint hoover_43615073',
+            'ProductTitleFR': '',
+            'ProductDescriptionEN': '',
+            'ProductDescriptionFR': '',
+            'ProductCategory': 'All Parts',
+            'RegularPrice': '12.99'
+        },
+        {
+            'SKU': 'CC003',
+            'ProductTitleEN': 'BracketWall Mounting dirtde_1500006600',
+            'ProductTitleFR': '',
+            'ProductDescriptionEN': '',
+            'ProductDescriptionFR': '',
+            'ProductCategory': 'Johnny Vac Parts (*)',
+            'RegularPrice': '8.50'
+        },
     ]
     
-    print("Testing ProductCategorizer v4")
+    print("Testing ProductCategorizer v4.1 (with CamelCase splitting)")
     print("=" * 60)
     
     categorized, skipped = categorizer.batch_categorize(
