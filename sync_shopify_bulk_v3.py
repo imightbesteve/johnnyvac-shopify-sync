@@ -62,6 +62,11 @@ LANGUAGE = 'en'
 DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 ARCHIVE_MISSING = os.environ.get('ARCHIVE_MISSING', 'true').lower() == 'true'
 
+# Out-of-stock products stay ACTIVE and show as "Sold out" instead of being
+# unpublished to DRAFT (which 404s the URL and churns Google's index every
+# time stock flips). Set KEEP_OOS_ACTIVE=false to restore the old behavior.
+KEEP_OOS_ACTIVE = os.environ.get('KEEP_OOS_ACTIVE', 'true').lower() == 'true'
+
 # Description shorter than this (text chars) counts as "thin" and gets enriched
 MIN_DESCRIPTION_LENGTH = 80
 
@@ -218,7 +223,9 @@ def build_desired_state(product: Dict) -> Dict:
         'jv_desc_is_rich': len(strip_html(jv_desc)) >= MIN_DESCRIPTION_LENGTH,
         'price': normalize_price(product.get('RegularPrice', '0.00')),
         'inventory': inventory,
-        'status': 'ACTIVE' if inventory > 0 else 'DRAFT',
+        # inventoryPolicy DENY already prevents overselling; keeping the page
+        # ACTIVE preserves its Google indexing while it shows "Sold out"
+        'status': 'ACTIVE' if (KEEP_OOS_ACTIVE or inventory > 0) else 'DRAFT',
         'product_type': category_info.get('product_type', 'Other > Needs Review'),
         'vendor': compute_vendor(title),
         'category_gid': taxonomy_for_handle(handle_tag),
