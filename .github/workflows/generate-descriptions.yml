@@ -21,6 +21,14 @@ on:
         required: false
         default: '80'
         type: string
+      engine:
+        description: 'Description engine'
+        required: false
+        default: 'ai'
+        type: choice
+        options:
+          - 'ai'
+          - 'template'
 
 jobs:
   generate-descriptions:
@@ -37,12 +45,14 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests anthropic
 
       - name: Run Description Generator
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-8' }}
         run: |
           ARGS="--export description_results.csv --samples 15"
 
@@ -60,6 +70,11 @@ jobs:
           if [ -n "${{ inputs.limit }}" ]; then
             ARGS="$ARGS --limit ${{ inputs.limit }}"
             echo "📊 Limited to ${{ inputs.limit }} products"
+          fi
+
+          if [ "${{ inputs.engine }}" == "template" ]; then
+            ARGS="$ARGS --template"
+            echo "📝 Forcing template engine (no AI)"
           fi
 
           echo "Running: python3 description_generator.py $ARGS"

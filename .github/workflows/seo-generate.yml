@@ -16,6 +16,14 @@ on:
         required: false
         default: ''
         type: string
+      scope:
+        description: 'Which products to process'
+        required: false
+        default: 'only-missing'
+        type: choice
+        options:
+          - 'only-missing'
+          - 'all'
 
 jobs:
   generate-seo:
@@ -51,7 +59,12 @@ jobs:
             ARGS="$ARGS --limit ${{ inputs.limit }}"
             echo "📊 Limited to ${{ inputs.limit }} products"
           fi
-          
+
+          if [ "${{ inputs.scope }}" == "only-missing" ]; then
+            ARGS="$ARGS --only-missing"
+            echo "🎯 Only processing products without existing SEO titles"
+          fi
+
           echo "Running: python3 seo_generator.py $ARGS"
           python3 seo_generator.py $ARGS
       

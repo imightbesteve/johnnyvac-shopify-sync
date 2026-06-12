@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
-# sync_shopify_v3.py
+# sync_shopify_bulk_v3.py
 """
-JohnnyVac to Shopify Sync v3.4 - MPN METAFIELD SUPPORT
+JohnnyVac to Shopify Sync v4.0 - CONTENT, SEO & INVENTORY OVERHAUL
 
-CHANGES from v3.3:
-- Added MPN (Manufacturer Part Number) metafield using JohnnyVac SKU
-- Google accepts Brand + MPN as GTIN alternative for products without barcodes
-- Metafield added to: productSet, productCreate, productUpdate, and both bulk ops
-
-BREAKING CHANGE FIX: Shopify API 2024-01+ removed 'variants' and 'images' 
-from ProductInput. This version uses:
-- productSet for creates (recommended for external sync)
-- productUpdate for basic updates + productVariantsBulkUpdate for variant updates
-
-Expected time:
-- If bulk works: ~15-20 minutes
-- If fallback needed: ~45-60 minutes
+CHANGES from v3.4:
+- FIXED: inventory quantities are now actually written to Shopify
+  (inventorySetQuantities, batched 250/call). Previously the delta flagged
+  inventory changes but never applied them, so the same products were
+  re-updated every single day and stock levels went stale.
+- FIXED: price changes are now applied in the bulk path too (second bulk
+  mutation with productVariantsBulkUpdate). Previously bulk updates silently
+  skipped price.
+- FIXED: rich descriptions are PROTECTED. The sync only writes a description
+  when the existing one is thin (< 80 chars of text); enriched descriptions
+  from description_generator.py / the AI engine are never overwritten.
+- NEW: new/thin products get a rich description at sync time (Claude AI via
+  ANTHROPIC_API_KEY when available, template fallback otherwise).
+- NEW: SEO meta title/description set on create, and backfilled on products
+  that have none.
+- NEW: vendor = real detected brand (Hoover, Miele, ...) instead of
+  hardcoding "JohnnyVac" on everything. Brand + MPN is the GTIN substitute
+  Google uses, so brand accuracy matters.
+- NEW: Shopify Standard Product Taxonomy category set per product (powers
+  Google Merchant Center categorization / structured data).
+- NEW: manual tags are preserved — only managed tags (category handle,
+  confidence:*, source:*) are replaced; everything else is kept.
+- NEW: archiving a product now creates a 301 URL redirect to its collection
+  page (fixes the GSC "Not found (404)" errors).
+- productUpdate migrated from the deprecated `input` argument to `product`
+  (ProductUpdateInput) for API 2026-01.
 """
 
 import os
@@ -30,6 +43,11 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from categorizer_v4 import ProductCategorizer
+from product_content import (
+    ai_available, build_description, compute_vendor,
+    generate_descriptions_ai, generate_seo_description, generate_seo_title,
+    strip_html, taxonomy_for_handle,
+)
 
 # =============================================================================
 # CONFIGURATION
@@ -43,6 +61,14 @@ IMAGE_BASE_URL = 'https://www.johnnyvacstock.com/photos/web/'
 LANGUAGE = 'en'
 DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 ARCHIVE_MISSING = os.environ.get('ARCHIVE_MISSING', 'true').lower() == 'true'
+
+# Out-of-stock products stay ACTIVE and show as "Sold out" instead of being
+# unpublished to DRAFT (which 404s the URL and churns Google's index every
+# time stock flips). Set KEEP_OOS_ACTIVE=false to restore the old behavior.
+KEEP_OOS_ACTIVE = os.environ.get('KEEP_OOS_ACTIVE', 'true').lower() == 'true'
+
+# Description shorter than this (text chars) counts as "thin" and gets enriched
+MIN_DESCRIPTION_LENGTH = 80
 
 # API settings
 API_VERSION = '2026-01'
@@ -60,7 +86,10 @@ MAX_RETRIES = 3
 
 # Bulk operation settings
 POLL_INTERVAL = 10
-MAX_POLL_TIME = 3600  # 1 hour max for bulk query
+MAX_POLL_TIME = 3600  # 1 hour max per bulk operation
+
+# Tags the sync owns (everything else on a product is preserved)
+MANAGED_TAG_PREFIXES = ('confidence:', 'source:')
 
 # =============================================================================
 # LOGGING
@@ -79,12 +108,12 @@ class RateLimiter:
         self.requests_per_second = requests_per_second
         self.requests: List[float] = []
         self._lock = threading.Lock()
-    
+
     def throttle(self):
         with self._lock:
             now = time.time()
             self.requests = [t for t in self.requests if now - t < 1.0]
-            
+
             if len(self.requests) >= self.requests_per_second:
                 oldest = min(self.requests)
                 wait_time = 1.0 - (now - oldest) + 0.05
@@ -95,7 +124,7 @@ class RateLimiter:
                     finally:
                         self._lock.acquire()
                     return self.throttle()
-            
+
             self.requests.append(time.time())
 
 rate_limiter = RateLimiter(RATE_LIMIT_PER_SECOND)
@@ -108,22 +137,22 @@ def graphql_request(query: str, variables: Optional[Dict] = None, use_rate_limit
     """Make a GraphQL request to Shopify"""
     if use_rate_limit:
         rate_limiter.throttle()
-    
+
     payload = {'query': query}
     if variables:
         payload['variables'] = variables
-    
+
     for attempt in range(MAX_RETRIES):
         try:
             response = requests.post(GRAPHQL_URL, json=payload, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             result = response.json()
-            
+
             if 'errors' in result:
                 log(f"GraphQL errors: {result['errors']}", 'WARNING')
-            
+
             return result
-            
+
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             if attempt < MAX_RETRIES - 1:
                 wait = (attempt + 1) * 5
@@ -131,7 +160,7 @@ def graphql_request(query: str, variables: Optional[Dict] = None, use_rate_limit
                 time.sleep(wait)
             else:
                 raise
-    
+
     return {}
 
 # =============================================================================
@@ -148,25 +177,14 @@ def clean_html(html_str: str) -> str:
     html_str = re.sub(r'\s+', ' ', html_str).strip()
     return html_str if html_str not in ['', '<p></p>', ' '] else ''
 
-def sanitize_tag(s: str) -> str:
-    return re.sub(r'[^a-z0-9\-_]+', '-', s.lower()).strip('-')[:80]
-
 def normalize_price(price_str: str) -> str:
     try:
         return f"{float(price_str):.2f}"
     except (ValueError, TypeError):
         return "0.00"
 
-# =============================================================================
-# MPN METAFIELD HELPER  — NEW in v3.4
-# =============================================================================
-
 def build_metafields(sku: str) -> List[Dict]:
-    """
-    Build metafields array for a product.
-    Sets the JohnnyVac SKU as the MPN (Manufacturer Part Number).
-    Google accepts Brand + MPN as an alternative to GTIN/barcode.
-    """
+    """custom.mpn = JohnnyVac SKU. Google accepts Brand + MPN instead of GTIN."""
     metafields = []
     if sku:
         metafields.append({
@@ -177,23 +195,66 @@ def build_metafields(sku: str) -> List[Dict]:
         })
     return metafields
 
+def merge_tags(existing_tags: List[str], managed_tags: List[str], known_handles: Set[str]) -> List[str]:
+    """Replace only the tags this sync owns; preserve everything added manually."""
+    preserved = [
+        t for t in (existing_tags or [])
+        if not t.startswith(MANAGED_TAG_PREFIXES) and t not in known_handles
+    ]
+    return sorted(set(preserved) | set(managed_tags))
+
+# =============================================================================
+# DESIRED STATE (per CSV product)
+# =============================================================================
+
+def build_desired_state(product: Dict) -> Dict:
+    """Compute everything we want Shopify to hold for this CSV row."""
+    sku = product.get('SKU', '')
+    category_info = product.get('category', {})
+    title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '') or sku
+    jv_desc = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
+    inventory = int(float(product.get('Inventory', '0') or 0))
+    handle_tag = category_info.get('handle', 'uncategorized')
+
+    return {
+        'sku': sku,
+        'title': title,
+        'jv_desc': jv_desc,
+        'jv_desc_is_rich': len(strip_html(jv_desc)) >= MIN_DESCRIPTION_LENGTH,
+        'price': normalize_price(product.get('RegularPrice', '0.00')),
+        'inventory': inventory,
+        # inventoryPolicy DENY already prevents overselling; keeping the page
+        # ACTIVE preserves its Google indexing while it shows "Sold out"
+        'status': 'ACTIVE' if (KEEP_OOS_ACTIVE or inventory > 0) else 'DRAFT',
+        'product_type': category_info.get('product_type', 'Other > Needs Review'),
+        'vendor': compute_vendor(title),
+        'category_gid': taxonomy_for_handle(handle_tag),
+        'handle_tag': handle_tag,
+        'managed_tags': [
+            handle_tag,
+            f"confidence:{category_info.get('confidence', 'low')}",
+            f"source:{category_info.get('source', 'unknown')}"
+        ],
+        'upc': product.get('upc', '') or None,
+    }
+
 # =============================================================================
 # CSV FETCHING
 # =============================================================================
 
 def fetch_csv_data() -> Tuple[List[Dict], List[str]]:
     log(f"Fetching CSV from: {CSV_URL}")
-    
+
     response = requests.get(CSV_URL, timeout=60)
     response.raise_for_status()
     lines = response.text.splitlines()
-    
+
     reader = csv.DictReader(lines, delimiter=';')
-    
+
     products = []
     seen_skus: Set[str] = set()
     duplicate_skus: List[str] = []
-    
+
     for row in reader:
         sku = (row.get('SKU') or '').strip()
         if not sku:
@@ -204,11 +265,11 @@ def fetch_csv_data() -> Tuple[List[Dict], List[str]]:
         seen_skus.add(sku)
         cleaned_row = {k: (v.strip() if v else '') for k, v in row.items()}
         products.append(cleaned_row)
-    
+
     log(f"✓ Parsed {len(products)} products from CSV")
     if duplicate_skus:
         log(f"  Found {len(duplicate_skus)} duplicate SKUs", 'WARNING')
-    
+
     return products, duplicate_skus
 
 # =============================================================================
@@ -222,7 +283,7 @@ def get_default_location_id() -> Optional[str]:
     global _location_id_cache
     if _location_id_cache:
         return _location_id_cache
-    
+
     query = """
     query {
         locations(first: 1) {
@@ -235,7 +296,7 @@ def get_default_location_id() -> Optional[str]:
         }
     }
     """
-    
+
     result = graphql_request(query, use_rate_limit=False)
     edges = result.get('data', {}).get('locations', {}).get('edges', [])
     if edges:
@@ -251,7 +312,7 @@ def get_default_location_id() -> Optional[str]:
 def get_existing_products_bulk() -> Dict[str, Dict]:
     """Use bulk operation to fetch all existing products - this is the fast part!"""
     log("Starting bulk query for existing products...")
-    
+
     mutation = """
     mutation {
       bulkOperationRunQuery(
@@ -262,8 +323,18 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
               node {
                 id
                 title
+                handle
+                vendor
                 productType
                 status
+                tags
+                description(truncateAt: 200)
+                category {
+                  id
+                }
+                seo {
+                  title
+                }
                 variants(first: 5) {
                   edges {
                     node {
@@ -271,6 +342,9 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
                       sku
                       price
                       inventoryQuantity
+                      inventoryItem {
+                        id
+                      }
                     }
                   }
                 }
@@ -291,20 +365,20 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
       }
     }
     """
-    
+
     result = graphql_request(mutation, use_rate_limit=False)
-    
+
     errors = result.get('data', {}).get('bulkOperationRunQuery', {}).get('userErrors', [])
     if errors:
         log(f"Bulk query errors: {errors}", 'ERROR')
         raise Exception(f"Bulk query failed: {errors}")
-    
+
     return poll_and_download_bulk_results()
 
 def poll_and_download_bulk_results() -> Dict[str, Dict]:
     """Poll bulk operation and download results"""
     log("Polling for bulk query completion...")
-    
+
     query = """
     query {
       currentBulkOperation {
@@ -316,21 +390,21 @@ def poll_and_download_bulk_results() -> Dict[str, Dict]:
       }
     }
     """
-    
+
     start_time = time.time()
-    
+
     while time.time() - start_time < MAX_POLL_TIME:
         result = graphql_request(query, use_rate_limit=False)
         operation = result.get('data', {}).get('currentBulkOperation')
-        
+
         if not operation:
             time.sleep(POLL_INTERVAL)
             continue
-        
+
         status = operation.get('status')
         count = operation.get('objectCount', 0)
         log(f"  Bulk operation status: {status}, objects: {count}")
-        
+
         if status == 'COMPLETED':
             url = operation.get('url')
             if url:
@@ -338,34 +412,43 @@ def poll_and_download_bulk_results() -> Dict[str, Dict]:
             return {}
         elif status in ['FAILED', 'CANCELED']:
             raise Exception(f"Bulk operation failed: {operation.get('errorCode')}")
-        
+
         time.sleep(POLL_INTERVAL)
-    
+
     raise Exception("Bulk operation timed out")
+
+def _existing_from_product_node(obj: Dict) -> Dict:
+    return {
+        'product_id': obj['id'],
+        'title': obj.get('title', ''),
+        'handle': obj.get('handle', ''),
+        'vendor': obj.get('vendor', ''),
+        'product_type': obj.get('productType', ''),
+        'status': obj.get('status', 'ACTIVE'),
+        'tags': obj.get('tags') or [],
+        'description_text': strip_html(obj.get('description', '') or ''),
+        'category_id': (obj.get('category') or {}).get('id', '') or '',
+        'seo_title': (obj.get('seo') or {}).get('title', '') or '',
+    }
 
 def download_bulk_results(url: str) -> Dict[str, Dict]:
     """Download and parse bulk query results"""
     log("Downloading bulk results...")
-    
+
     response = requests.get(url, timeout=120)
     response.raise_for_status()
-    
+
     products = {}
     current_product = None
-    
+
     for line in response.text.strip().split('\n'):
         if not line:
             continue
         obj = json.loads(line)
-        
+
         # Product line (has id but not sku)
         if 'id' in obj and 'sku' not in obj and '__parentId' not in obj:
-            current_product = {
-                'product_id': obj['id'],
-                'title': obj.get('title', ''),
-                'product_type': obj.get('productType', ''),
-                'status': obj.get('status', 'ACTIVE')
-            }
+            current_product = _existing_from_product_node(obj)
         # Variant line (has sku and __parentId)
         elif 'sku' in obj:
             sku = obj.get('sku')
@@ -373,10 +456,11 @@ def download_bulk_results(url: str) -> Dict[str, Dict]:
                 products[sku] = {
                     **current_product,
                     'variant_id': obj['id'],
+                    'inventory_item_id': (obj.get('inventoryItem') or {}).get('id', ''),
                     'price': obj.get('price', '0'),
                     'inventory': obj.get('inventoryQuantity', 0)
                 }
-    
+
     log(f"✓ Parsed {len(products)} existing products from Shopify")
     return products
 
@@ -386,16 +470,22 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
     products = {}
     cursor = None
     page = 0
-    
+
     query = """
     query getProducts($cursor: String) {
-        products(first: 250, after: $cursor) {
+        products(first: 100, after: $cursor) {
             edges {
                 node {
                     id
                     title
+                    handle
+                    vendor
                     productType
                     status
+                    tags
+                    description(truncateAt: 200)
+                    category { id }
+                    seo { title }
                     variants(first: 5) {
                         edges {
                             node {
@@ -403,6 +493,7 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                                 sku
                                 price
                                 inventoryQuantity
+                                inventoryItem { id }
                             }
                         }
                     }
@@ -413,37 +504,36 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
         }
     }
     """
-    
+
     while True:
         page += 1
         result = graphql_request(query, {'cursor': cursor} if cursor else None)
-        
+
         edges = result.get('data', {}).get('products', {}).get('edges', [])
         page_info = result.get('data', {}).get('products', {}).get('pageInfo', {})
-        
+
         for edge in edges:
-            product = edge['node']
-            for var_edge in product.get('variants', {}).get('edges', []):
+            node = edge['node']
+            base = _existing_from_product_node(node)
+            for var_edge in node.get('variants', {}).get('edges', []):
                 variant = var_edge['node']
                 sku = variant.get('sku')
                 if sku:
                     products[sku] = {
-                        'product_id': product['id'],
+                        **base,
                         'variant_id': variant['id'],
-                        'title': product.get('title', ''),
-                        'product_type': product.get('productType', ''),
-                        'status': product.get('status', 'ACTIVE'),
+                        'inventory_item_id': (variant.get('inventoryItem') or {}).get('id', ''),
                         'price': variant.get('price', '0'),
                         'inventory': variant.get('inventoryQuantity', 0)
                     }
-        
+
         if page % 20 == 0:
             log(f"  Page {page}, products: {len(products)}")
-        
+
         if not page_info.get('hasNextPage'):
             break
         cursor = edges[-1]['cursor']
-    
+
     log(f"✓ Fetched {len(products)} existing products")
     return products
 
@@ -453,153 +543,229 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
 
 def calculate_delta(
     csv_products: List[Dict],
-    existing_products: Dict[str, Dict]
+    existing_products: Dict[str, Dict],
+    known_handles: Set[str]
 ) -> Tuple[List[Dict], List[Dict], List[Dict], List[str]]:
     """Calculate what needs to be created, updated, or archived"""
-    
+
     to_create = []
     to_update = []
     unchanged = []
     csv_skus = set()
-    
+
+    counts = {'core': 0, 'price': 0, 'inventory': 0, 'vendor': 0, 'tags': 0,
+              'seo': 0, 'description': 0, 'category': 0}
+
     for product in csv_products:
         sku = product.get('SKU', '')
         csv_skus.add(sku)
-        category_info = product.get('category', {})
-        
+        desired = build_desired_state(product)
+        product['_desired'] = desired
+
         if sku not in existing_products:
             to_create.append(product)
+            continue
+
+        existing = existing_products[sku]
+        final_tags = merge_tags(existing.get('tags', []), desired['managed_tags'], known_handles)
+        product['_final_tags'] = final_tags
+
+        flags = {
+            'core': (
+                existing['title'] != desired['title'] or
+                existing['product_type'] != desired['product_type'] or
+                existing['status'] != desired['status']
+            ),
+            'price': normalize_price(existing['price']) != desired['price'],
+            'inventory': existing.get('inventory', 0) != desired['inventory'],
+            'vendor': existing.get('vendor', '') != desired['vendor'],
+            'tags': set(existing.get('tags', [])) != set(final_tags),
+            'seo': not existing.get('seo_title'),
+            'description': len(existing.get('description_text', '')) < MIN_DESCRIPTION_LENGTH,
+            'category': bool(desired['category_gid']) and existing.get('category_id', '') != desired['category_gid'],
+        }
+
+        if any(flags.values()):
+            for k, v in flags.items():
+                if v:
+                    counts[k] += 1
+            product['_existing'] = existing
+            product['_flags'] = flags
+            to_update.append(product)
         else:
-            existing = existing_products[sku]
-            
-            new_title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
-            new_price = normalize_price(product.get('RegularPrice', '0'))
-            new_inventory = int(float(product.get('Inventory', '0') or 0))
-            new_product_type = category_info.get('product_type', '')
-            new_status = 'ACTIVE' if new_inventory > 0 else 'DRAFT'
-            
-            has_changes = (
-                existing['title'] != new_title or
-                normalize_price(existing['price']) != new_price or
-                existing.get('inventory', 0) != new_inventory or
-                existing['product_type'] != new_product_type or
-                existing['status'] != new_status
-            )
-            
-            if has_changes:
-                product['_existing'] = existing
-                to_update.append(product)
-            else:
-                unchanged.append(product)
-    
+            unchanged.append(product)
+
     missing_skus = [sku for sku in existing_products if sku not in csv_skus]
-    
+
     log(f"\nDELTA SUMMARY:")
     log(f"  To CREATE: {len(to_create)}")
     log(f"  To UPDATE: {len(to_update)}")
+    for k, v in counts.items():
+        if v:
+            log(f"    - {k} changes: {v}")
     log(f"  UNCHANGED: {len(unchanged)} (skipping)")
     log(f"  MISSING (will archive): {len(missing_skus)}")
-    
+
     return to_create, to_update, unchanged, missing_skus
+
+# =============================================================================
+# DESCRIPTION GENERATION PASS (AI with template fallback)
+# =============================================================================
+
+def needs_generated_description(product: Dict) -> bool:
+    """True when neither Shopify nor the JV feed has a rich description."""
+    desired = product['_desired']
+    if desired['jv_desc_is_rich']:
+        return False
+    if '_existing' in product:
+        return product.get('_flags', {}).get('description', False)
+    return True  # new product with thin JV description
+
+def generate_missing_descriptions(products: List[Dict]):
+    """One batched AI pass for every product that needs a generated description.
+    Results land in product['_ai_desc']; build_description() falls back to
+    templates for anything the AI pass didn't return."""
+    needing = [p for p in products if needs_generated_description(p)]
+    if not needing:
+        return
+
+    if ai_available() and not DRY_RUN:
+        log(f"Generating AI descriptions for {len(needing)} products (Claude API)...")
+        items = [{'sku': p['_desired']['sku'],
+                  'title': p['_desired']['title'],
+                  'product_type': p['_desired']['product_type']} for p in needing]
+        ai_results = generate_descriptions_ai(items)
+        for p in needing:
+            p['_ai_desc'] = ai_results.get(p['_desired']['sku'])
+        log(f"✓ AI generated {len(ai_results)} descriptions "
+            f"({len(needing) - len(ai_results)} will use templates)")
+    else:
+        engine = 'DRY RUN' if DRY_RUN else 'no ANTHROPIC_API_KEY'
+        log(f"{len(needing)} products need generated descriptions (templates — {engine})")
+
+def description_for(product: Dict) -> str:
+    desired = product['_desired']
+    return build_description(
+        desired['title'], desired['product_type'], desired['sku'],
+        jv_desc_html=desired['jv_desc'], ai_desc=product.get('_ai_desc'),
+        min_length=MIN_DESCRIPTION_LENGTH,
+    )
+
+# =============================================================================
+# INPUT BUILDERS
+# =============================================================================
+
+def build_create_input(product: Dict, location_id: Optional[str]) -> Dict:
+    """ProductSetInput for a brand-new product."""
+    d = product['_desired']
+
+    variant_input = {
+        "sku": d['sku'],
+        "price": d['price'],
+        "barcode": d['upc'],
+        "inventoryPolicy": "DENY",
+        "inventoryItem": {"tracked": True},
+        "optionValues": [
+            {"optionName": "Title", "name": "Default Title"}
+        ]
+    }
+    if location_id and d['inventory'] > 0:
+        variant_input["inventoryQuantities"] = [{
+            "locationId": location_id,
+            "name": "available",
+            "quantity": d['inventory']
+        }]
+
+    product_input = {
+        "title": d['title'],
+        "descriptionHtml": description_for(product),
+        "productType": d['product_type'],
+        "vendor": d['vendor'],
+        "status": d['status'],
+        "tags": sorted(set(d['managed_tags'])),
+        "metafields": build_metafields(d['sku']),
+        "seo": {
+            "title": generate_seo_title(d['title'], d['sku']),
+            "description": generate_seo_description(d['title'], d['sku']),
+        },
+        "productOptions": [
+            {"name": "Title", "values": [{"name": "Default Title"}]}
+        ],
+        "variants": [variant_input],
+        "files": [{
+            "originalSource": f"{IMAGE_BASE_URL}{d['sku']}.jpg",
+            "contentType": "IMAGE"
+        }]
+    }
+    if d['category_gid']:
+        product_input["category"] = d['category_gid']
+    return product_input
+
+def build_update_input(product: Dict) -> Dict:
+    """ProductUpdateInput for an existing product (product-level fields only;
+    price goes through productVariantsBulkUpdate, inventory through
+    inventorySetQuantities)."""
+    d = product['_desired']
+    existing = product['_existing']
+    flags = product.get('_flags', {})
+
+    update_input = {
+        "id": existing['product_id'],
+        "title": d['title'],
+        "productType": d['product_type'],
+        "vendor": d['vendor'],
+        "tags": product.get('_final_tags', sorted(set(d['managed_tags']))),
+        "status": d['status'],
+        "metafields": build_metafields(d['sku']),
+    }
+    # Only write a description when the existing one is thin — never
+    # clobber enriched content.
+    if flags.get('description'):
+        update_input["descriptionHtml"] = description_for(product)
+    # Only set SEO when the product has none (manual SEO edits are kept).
+    if flags.get('seo'):
+        update_input["seo"] = {
+            "title": generate_seo_title(d['title'], d['sku']),
+            "description": generate_seo_description(d['title'], d['sku']),
+        }
+    if flags.get('category') and d['category_gid']:
+        update_input["category"] = d['category_gid']
+    return update_input
 
 # =============================================================================
 # PRODUCT CREATE - Using productSet (API 2024-01+)
 # =============================================================================
 
+PRODUCT_SET_MUTATION = """
+mutation productSet($input: ProductSetInput!, $synchronous: Boolean!) {
+    productSet(input: $input, synchronous: $synchronous) {
+        product {
+            id
+        }
+        userErrors {
+            field
+            message
+            code
+        }
+    }
+}
+"""
+
 def create_product(product_data: Dict) -> Optional[str]:
-    """
-    Create a single product using productSet mutation.
-    
-    API 2024-01+ BREAKING CHANGE: productCreate no longer accepts 'variants' or 'images'.
-    Use productSet instead, which is designed for external data sync.
-    """
-    sku = product_data.get('SKU', '')
-    category_info = product_data.get('category', {})
-    
+    """Create a single product using productSet mutation."""
+    sku = product_data['_desired']['sku']
+
     if DRY_RUN:
         return f"dry-run-{sku}"
-    
-    title = product_data.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', sku)
-    description = clean_html(product_data.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
-    price = normalize_price(product_data.get('RegularPrice', '0.00'))
-    inventory = int(float(product_data.get('Inventory', '0') or 0))
-    weight = float(product_data.get('weight', '0') or 0)
-    upc = product_data.get('upc', '') or None
-    product_type = category_info.get('product_type', 'Other > Needs Review')
-    status = 'ACTIVE' if inventory > 0 else 'DRAFT'
-    
-    tags = [
-        category_info.get('handle', 'uncategorized'),
-        f"confidence:{category_info.get('confidence', 'low')}",
-        f"source:{category_info.get('source', 'unknown')}"
-    ]
-    
-    # Get location ID for inventory
+
     location_id = get_default_location_id()
-    
-    # Build the productSet mutation (API 2024-01+)
-    mutation = """
-    mutation productSet($input: ProductSetInput!, $synchronous: Boolean!) {
-        productSet(input: $input, synchronous: $synchronous) {
-            product {
-                id
-                variants(first: 1) {
-                    nodes {
-                        id
-                    }
-                }
-            }
-            userErrors {
-                field
-                message
-                code
-            }
-        }
-    }
-    """
-    
-    # Build variant with inventory if location available
-    variant_input = {
-        "sku": sku,
-        "price": price,
-        "barcode": upc,
-        "inventoryPolicy": "DENY",
-        "optionValues": [
-            {"optionName": "Title", "name": "Default Title"}
-        ]
-    }
-    
-    # Add inventory quantities if we have a location
-    if location_id and inventory > 0:
-        variant_input["inventoryQuantities"] = [{
-            "locationId": location_id,
-            "name": "available",
-            "quantity": inventory
-        }]
-    
     variables = {
         "synchronous": True,
-        "input": {
-            "title": title,
-            "descriptionHtml": description,
-            "productType": product_type,
-            "vendor": "JohnnyVac",
-            "status": status,
-            "tags": tags,
-            "metafields": build_metafields(sku),  # MPN CHANGE
-            "productOptions": [
-                {"name": "Title", "values": [{"name": "Default Title"}]}
-            ],
-            "variants": [variant_input],
-            "files": [{
-                "originalSource": f"{IMAGE_BASE_URL}{sku}.jpg",
-                "contentType": "IMAGE"
-            }]
-        }
+        "input": build_create_input(product_data, location_id)
     }
-    
-    result = graphql_request(mutation, variables)
-    
+
+    result = graphql_request(PRODUCT_SET_MUTATION, variables)
+
     user_errors = result.get('data', {}).get('productSet', {}).get('userErrors', [])
     if user_errors:
         # Filter out non-critical errors (like image not found)
@@ -607,297 +773,150 @@ def create_product(product_data: Dict) -> Optional[str]:
         if critical_errors:
             log(f"Create {sku} failed: {critical_errors}", 'WARNING')
             return None
-    
-    product = result.get('data', {}).get('productSet', {}).get('product')
-    if product:
-        return product['id']
-    
+
+    prod = result.get('data', {}).get('productSet', {}).get('product')
+    if prod:
+        return prod['id']
+
     return None
 
+# =============================================================================
+# PRODUCT UPDATE - productUpdate + productVariantsBulkUpdate
+# =============================================================================
 
-def create_product_simple(product_data: Dict) -> Optional[str]:
-    """
-    Alternative: Create product using productCreate + productVariantsBulkUpdate.
-    Use this if productSet doesn't work for some reason.
-    """
-    sku = product_data.get('SKU', '')
-    category_info = product_data.get('category', {})
-    
-    if DRY_RUN:
-        return f"dry-run-{sku}"
-    
-    title = product_data.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', sku)
-    description = clean_html(product_data.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
-    price = normalize_price(product_data.get('RegularPrice', '0.00'))
-    product_type = category_info.get('product_type', 'Other > Needs Review')
-    inventory = int(float(product_data.get('Inventory', '0') or 0))
-    status = 'ACTIVE' if inventory > 0 else 'DRAFT'
-    upc = product_data.get('upc', '') or None
-    
-    tags = [
-        category_info.get('handle', 'uncategorized'),
-        f"confidence:{category_info.get('confidence', 'low')}",
-        f"source:{category_info.get('source', 'unknown')}"
-    ]
-    
-    # Step 1: Create basic product (API 2024-01+ format)
-    # Note: 'product' parameter, not 'input'
-    create_mutation = """
-    mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
-        productCreate(product: $product, media: $media) {
-            product {
-                id
-                variants(first: 1) {
-                    nodes {
-                        id
-                        inventoryItem {
-                            id
-                        }
-                    }
-                }
-            }
-            userErrors {
-                field
-                message
-            }
+PRODUCT_UPDATE_MUTATION = """
+mutation productUpdate($product: ProductUpdateInput!) {
+    productUpdate(product: $product) {
+        product {
+            id
+        }
+        userErrors {
+            field
+            message
         }
     }
-    """
-    
-    create_variables = {
-        "product": {
-            "title": title,
-            "descriptionHtml": description,
-            "productType": product_type,
-            "vendor": "JohnnyVac",
-            "status": status,
-            "tags": tags,
-            "metafields": build_metafields(sku)  # MPN CHANGE
-        },
-        "media": [{
-            "originalSource": f"{IMAGE_BASE_URL}{sku}.jpg",
-            "mediaContentType": "IMAGE"
-        }]
-    }
-    
-    result = graphql_request(create_mutation, create_variables)
-    
-    errors = result.get('data', {}).get('productCreate', {}).get('userErrors', [])
-    if errors:
-        log(f"Create {sku} step 1 failed: {errors}", 'WARNING')
-        return None
-    
-    product = result.get('data', {}).get('productCreate', {}).get('product')
-    if not product:
-        return None
-    
-    product_id = product['id']
-    variant_nodes = product.get('variants', {}).get('nodes', [])
-    if not variant_nodes:
-        return product_id  # Product created but no variant to update
-    
-    variant_id = variant_nodes[0]['id']
-    
-    # Step 2: Update the default variant with SKU, price, etc.
-    update_mutation = """
-    mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-            productVariants {
-                id
-            }
-            userErrors {
-                field
-                message
-            }
+}
+"""
+
+VARIANT_PRICE_MUTATION = """
+mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants {
+            id
+        }
+        userErrors {
+            field
+            message
         }
     }
-    """
-    
-    update_variables = {
-        "productId": product_id,
-        "variants": [{
-            "id": variant_id,
-            "sku": sku,
-            "price": price,
-            "barcode": upc,
-            "inventoryPolicy": "DENY"
-        }]
-    }
-    
-    result = graphql_request(update_mutation, update_variables)
-    
-    errors = result.get('data', {}).get('productVariantsBulkUpdate', {}).get('userErrors', [])
-    if errors:
-        log(f"Update variant {sku} failed: {errors}", 'WARNING')
-        # Product was still created, return it
-    
-    return product_id
-
-
-# =============================================================================
-# PRODUCT UPDATE - Using productUpdate + productVariantsBulkUpdate
-# =============================================================================
+}
+"""
 
 def update_product(product_data: Dict) -> bool:
-    """Update an existing product using the new API structure"""
-    existing = product_data.get('_existing', {})
-    category_info = product_data.get('category', {})
-    sku = product_data.get('SKU', '')
-    
+    """Update an existing product (individual fallback path)."""
+    existing = product_data['_existing']
+    d = product_data['_desired']
+
     if DRY_RUN:
         return True
-    
-    title = product_data.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
-    description = clean_html(product_data.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
-    product_type = category_info.get('product_type', existing.get('product_type', ''))
-    price = normalize_price(product_data.get('RegularPrice', '0'))
-    inventory = int(float(product_data.get('Inventory', '0') or 0))
-    status = 'ACTIVE' if inventory > 0 else 'DRAFT'
-    
-    tags = [
-        category_info.get('handle', 'uncategorized'),
-        f"confidence:{category_info.get('confidence', 'low')}",
-        f"source:{category_info.get('source', 'unknown')}"
-    ]
-    
-    # Step 1: Update product-level fields
-    product_mutation = """
-    mutation productUpdate($input: ProductInput!) {
-        productUpdate(input: $input) {
-            product {
-                id
-            }
-            userErrors {
-                field
-                message
-            }
-        }
-    }
-    """
-    
-    product_variables = {
-        "input": {
-            "id": existing['product_id'],
-            "title": title,
-            "descriptionHtml": description,
-            "productType": product_type,
-            "tags": tags,
-            "status": status,
-            "metafields": build_metafields(sku)  # MPN CHANGE
-        }
-    }
-    
-    result = graphql_request(product_mutation, product_variables)
-    
+
+    result = graphql_request(PRODUCT_UPDATE_MUTATION, {"product": build_update_input(product_data)})
+
     errors = result.get('data', {}).get('productUpdate', {}).get('userErrors', [])
     if errors:
-        log(f"Update product {sku} failed: {errors}", 'WARNING')
+        log(f"Update product {d['sku']} failed: {errors}", 'WARNING')
         return False
-    
-    # Step 2: Update variant-level fields (price, sku, etc.)
-    variant_mutation = """
-    mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-            productVariants {
-                id
-            }
-            userErrors {
-                field
-                message
-            }
-        }
-    }
-    """
-    
-    variant_variables = {
-        "productId": existing['product_id'],
-        "variants": [{
-            "id": existing['variant_id'],
-            "price": price
-        }]
-    }
-    
-    result = graphql_request(variant_mutation, variant_variables)
-    
-    errors = result.get('data', {}).get('productVariantsBulkUpdate', {}).get('userErrors', [])
-    if errors:
-        log(f"Update variant {sku} failed: {errors}", 'WARNING')
-        # Don't return False - product was updated, just variant failed
-    
+
+    if product_data.get('_flags', {}).get('price'):
+        result = graphql_request(VARIANT_PRICE_MUTATION, {
+            "productId": existing['product_id'],
+            "variants": [{"id": existing['variant_id'], "price": d['price']}]
+        })
+        errors = result.get('data', {}).get('productVariantsBulkUpdate', {}).get('userErrors', [])
+        if errors:
+            log(f"Update variant {d['sku']} failed: {errors}", 'WARNING')
+            # Don't return False - product was updated, just variant failed
+
     return True
 
+# =============================================================================
+# INVENTORY SYNC — inventorySetQuantities, batched
+# =============================================================================
+
+INVENTORY_SET_MUTATION = """
+mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+    inventorySetQuantities(input: $input) {
+        inventoryAdjustmentGroup {
+            createdAt
+        }
+        userErrors {
+            field
+            message
+            code
+        }
+    }
+}
+"""
+
+def sync_inventory_quantities(products: List[Dict]) -> int:
+    """Write absolute 'available' quantities for every product whose inventory
+    changed. Batched 250 per call — this is the fix for inventory never
+    actually being synced (and the same products re-updating every day)."""
+    changed = [
+        p for p in products
+        if p.get('_flags', {}).get('inventory') and p.get('_existing', {}).get('inventory_item_id')
+    ]
+    if not changed:
+        return 0
+
+    location_id = get_default_location_id()
+    if not location_id:
+        log("No location available — skipping inventory sync", 'WARNING')
+        return 0
+
+    log(f"\nSyncing inventory for {len(changed)} products...")
+    if DRY_RUN:
+        log(f"[DRY RUN] Would set inventory on {len(changed)} products")
+        return len(changed)
+
+    updated = 0
+    CHUNK = 250
+    for start in range(0, len(changed), CHUNK):
+        chunk = changed[start:start + CHUNK]
+        quantities = [{
+            "inventoryItemId": p['_existing']['inventory_item_id'],
+            "locationId": location_id,
+            "quantity": p['_desired']['inventory'],
+        } for p in chunk]
+
+        result = graphql_request(INVENTORY_SET_MUTATION, {"input": {
+            "name": "available",
+            "reason": "correction",
+            "ignoreCompareQuantity": True,
+            "quantities": quantities,
+        }})
+        errors = result.get('data', {}).get('inventorySetQuantities', {}).get('userErrors', [])
+        if errors:
+            log(f"  Inventory batch errors: {errors[:3]}{'...' if len(errors) > 3 else ''}", 'WARNING')
+        else:
+            updated += len(chunk)
+        log(f"  Inventory progress: {min(start + CHUNK, len(changed))}/{len(changed)}")
+
+    log(f"✓ Inventory synced for {updated} products")
+    return updated
 
 # =============================================================================
 # BULK OPERATIONS - Try bulk first, fallback to individual
 # =============================================================================
 
-def try_bulk_create(products: List[Dict]) -> Tuple[bool, int]:
-    """
-    Try to create products using bulk mutation.
-    Returns (success, count).
-    """
-    if not products or DRY_RUN:
-        return False, 0
-    
-    log("Attempting bulk create (fast method)...")
-    
-    # Get location ID
-    location_id = get_default_location_id()
-    
-    # Generate JSONL for productSet operations
-    jsonl_file = 'bulk_creates.jsonl'
+def run_bulk_mutation(jsonl_lines: List[Dict], mutation: str, expected_count: int,
+                      label: str) -> Tuple[bool, int]:
+    """Stage a JSONL file and run a bulkOperationRunMutation with it."""
+    jsonl_file = 'bulk_input.jsonl'
     with open(jsonl_file, 'w', encoding='utf-8') as f:
-        for product in products:
-            sku = product.get('SKU', '')
-            category_info = product.get('category', {})
-            
-            title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', sku)
-            description = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
-            price = normalize_price(product.get('RegularPrice', '0.00'))
-            inventory = int(float(product.get('Inventory', '0') or 0))
-            product_type = category_info.get('product_type', 'Other > Needs Review')
-            status = 'ACTIVE' if inventory > 0 else 'DRAFT'
-            upc = product.get('upc', '') or None
-            
-            tags = [
-                category_info.get('handle', 'uncategorized'),
-                f"confidence:{category_info.get('confidence', 'low')}",
-                f"source:{category_info.get('source', 'unknown')}"
-            ]
-            
-            variant_input = {
-                "sku": sku,
-                "price": price,
-                "barcode": upc,
-                "inventoryPolicy": "DENY",
-                "optionValues": [{"optionName": "Title", "name": "Default Title"}]
-            }
-            
-            if location_id and inventory > 0:
-                variant_input["inventoryQuantities"] = [{
-                    "locationId": location_id,
-                    "name": "available", 
-                    "quantity": inventory
-                }]
-            
-            mutation_input = {
-                "input": {
-                    "title": title,
-                    "descriptionHtml": description,
-                    "productType": product_type,
-                    "vendor": "JohnnyVac",
-                    "status": status,
-                    "tags": tags,
-                    "metafields": build_metafields(sku),  # MPN CHANGE
-                    "productOptions": [{"name": "Title", "values": [{"name": "Default Title"}]}],
-                    "variants": [variant_input],
-                    "files": [{"originalSource": f"{IMAGE_BASE_URL}{sku}.jpg", "contentType": "IMAGE"}]
-                },
-                "synchronous": True
-            }
-            f.write(json.dumps(mutation_input) + '\n')
-    
-    # Get staged upload URL
+        for line in jsonl_lines:
+            f.write(json.dumps(line) + '\n')
+
     staged_mutation = """
     mutation {
       stagedUploadsCreate(input: [{
@@ -915,177 +934,110 @@ def try_bulk_create(products: List[Dict]) -> Tuple[bool, int]:
       }
     }
     """
-    
+
     try:
         result = graphql_request(staged_mutation, use_rate_limit=False)
-        
+
         errors = result.get('data', {}).get('stagedUploadsCreate', {}).get('userErrors', [])
         if errors:
             log(f"Staged upload error: {errors}", 'WARNING')
             return False, 0
-        
+
         target = result['data']['stagedUploadsCreate']['stagedTargets'][0]
         upload_url = target['url']
-        resource_url = target['resourceUrl']
         params = {p['name']: p['value'] for p in target['parameters']}
-        
-        # Get the 'key' parameter - THIS is what stagedUploadPath expects, not the full URL!
-        staged_path = params.get('key', resource_url)
-        
-        # Upload file
+        # The 'key' parameter is what stagedUploadPath expects, not the full URL
+        staged_path = params.get('key', target['resourceUrl'])
+
         with open(jsonl_file, 'rb') as f:
             files = {'file': ('bulk_input.jsonl', f, 'text/jsonl')}
             upload_response = requests.post(upload_url, data=params, files=files, timeout=300)
             upload_response.raise_for_status()
-        
-        log("✓ JSONL uploaded, starting bulk mutation...")
-        log(f"  Using staged path: {staged_path}")
-        
-        # Run bulk mutation with productSet
+
+        log(f"✓ JSONL uploaded, starting bulk {label}...")
+
         bulk_mutation = f'''
         mutation {{
           bulkOperationRunMutation(
-            mutation: "mutation call($input: ProductSetInput!, $synchronous: Boolean!) {{ productSet(input: $input, synchronous: $synchronous) {{ product {{ id }} userErrors {{ field message }} }} }}",
-            stagedUploadPath: "{staged_path}"
+            mutation: {json.dumps(mutation)},
+            stagedUploadPath: {json.dumps(staged_path)}
           ) {{
             bulkOperation {{ id status }}
             userErrors {{ field message }}
           }}
         }}
         '''
-        
+
         result = graphql_request(bulk_mutation, use_rate_limit=False)
-        
+
         errors = result.get('data', {}).get('bulkOperationRunMutation', {}).get('userErrors', [])
         if errors:
             log(f"Bulk mutation error: {errors}", 'WARNING')
             return False, 0
-        
-        return poll_bulk_mutation(len(products))
-        
+
+        return poll_bulk_mutation(expected_count)
+
     except Exception as e:
-        log(f"Bulk create failed: {e}", 'WARNING')
+        log(f"Bulk {label} failed: {e}", 'WARNING')
         return False, 0
+
+
+def try_bulk_create(products: List[Dict]) -> Tuple[bool, int]:
+    """Create products via bulk productSet. Returns (success, count)."""
+    if not products or DRY_RUN:
+        return False, 0
+
+    log("Attempting bulk create (fast method)...")
+    location_id = get_default_location_id()
+
+    lines = [{
+        "input": build_create_input(p, location_id),
+        "synchronous": True
+    } for p in products]
+
+    mutation = ("mutation call($input: ProductSetInput!, $synchronous: Boolean!) "
+                "{ productSet(input: $input, synchronous: $synchronous) "
+                "{ product { id } userErrors { field message } } }")
+    return run_bulk_mutation(lines, mutation, len(products), 'create')
 
 
 def try_bulk_update(products: List[Dict]) -> Tuple[bool, int]:
-    """
-    Try to update products using bulk mutation.
-    Returns (success, count).
-    """
+    """Update products via bulk productUpdate. Returns (success, count)."""
     if not products or DRY_RUN:
         return False, 0
-    
+
     log("Attempting bulk update (fast method)...")
-    
-    # Generate JSONL for productUpdate operations
-    jsonl_file = 'bulk_updates.jsonl'
-    with open(jsonl_file, 'w', encoding='utf-8') as f:
-        for product in products:
-            existing = product.get('_existing', {})
-            category_info = product.get('category', {})
-            sku = product.get('SKU', '')
-            
-            title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '')
-            description = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
-            product_type = category_info.get('product_type', existing.get('product_type', ''))
-            inventory = int(float(product.get('Inventory', '0') or 0))
-            status = 'ACTIVE' if inventory > 0 else 'DRAFT'
-            
-            tags = [
-                category_info.get('handle', 'uncategorized'),
-                f"confidence:{category_info.get('confidence', 'low')}",
-                f"source:{category_info.get('source', 'unknown')}"
-            ]
-            
-            mutation_input = {
-                "input": {
-                    "id": existing['product_id'],
-                    "title": title,
-                    "descriptionHtml": description,
-                    "productType": product_type,
-                    "tags": tags,
-                    "status": status,
-                    "metafields": build_metafields(sku)  # MPN CHANGE
-                }
-            }
-            f.write(json.dumps(mutation_input) + '\n')
-    
-    # Get staged upload URL
-    staged_mutation = """
-    mutation {
-      stagedUploadsCreate(input: [{
-        resource: BULK_MUTATION_VARIABLES,
-        filename: "bulk_input.jsonl",
-        mimeType: "text/jsonl",
-        httpMethod: POST
-      }]) {
-        stagedTargets {
-          url
-          resourceUrl
-          parameters { name value }
-        }
-        userErrors { field message }
-      }
-    }
-    """
-    
-    try:
-        result = graphql_request(staged_mutation, use_rate_limit=False)
-        
-        errors = result.get('data', {}).get('stagedUploadsCreate', {}).get('userErrors', [])
-        if errors:
-            log(f"Staged upload error: {errors}", 'WARNING')
-            return False, 0
-        
-        target = result['data']['stagedUploadsCreate']['stagedTargets'][0]
-        upload_url = target['url']
-        resource_url = target['resourceUrl']
-        params = {p['name']: p['value'] for p in target['parameters']}
-        
-        # Get the 'key' parameter - THIS is what stagedUploadPath expects, not the full URL!
-        staged_path = params.get('key', resource_url)
-        
-        # Upload file
-        with open(jsonl_file, 'rb') as f:
-            files = {'file': ('bulk_input.jsonl', f, 'text/jsonl')}
-            upload_response = requests.post(upload_url, data=params, files=files, timeout=300)
-            upload_response.raise_for_status()
-        
-        log("✓ JSONL uploaded, starting bulk mutation...")
-        log(f"  Using staged path: {staged_path}")
-        
-        # Run bulk mutation with productUpdate
-        bulk_mutation = f'''
-        mutation {{
-          bulkOperationRunMutation(
-            mutation: "mutation call($input: ProductInput!) {{ productUpdate(input: $input) {{ product {{ id }} userErrors {{ field message }} }} }}",
-            stagedUploadPath: "{staged_path}"
-          ) {{
-            bulkOperation {{ id status }}
-            userErrors {{ field message }}
-          }}
-        }}
-        '''
-        
-        result = graphql_request(bulk_mutation, use_rate_limit=False)
-        
-        errors = result.get('data', {}).get('bulkOperationRunMutation', {}).get('userErrors', [])
-        if errors:
-            log(f"Bulk mutation error: {errors}", 'WARNING')
-            return False, 0
-        
-        return poll_bulk_mutation(len(products))
-        
-    except Exception as e:
-        log(f"Bulk update failed: {e}", 'WARNING')
-        return False, 0
+    lines = [{"product": build_update_input(p)} for p in products]
+
+    mutation = ("mutation call($product: ProductUpdateInput!) "
+                "{ productUpdate(product: $product) "
+                "{ product { id } userErrors { field message } } }")
+    return run_bulk_mutation(lines, mutation, len(products), 'update')
+
+
+def try_bulk_price_update(products: List[Dict]) -> Tuple[bool, int]:
+    """Apply price changes via bulk productVariantsBulkUpdate.
+    (v3.x never updated prices in the bulk path at all.)"""
+    priced = [p for p in products if p.get('_flags', {}).get('price')]
+    if not priced or DRY_RUN:
+        return True, 0
+
+    log(f"Applying {len(priced)} price changes (bulk)...")
+    lines = [{
+        "productId": p['_existing']['product_id'],
+        "variants": [{"id": p['_existing']['variant_id'], "price": p['_desired']['price']}]
+    } for p in priced]
+
+    mutation = ("mutation call($productId: ID!, $variants: [ProductVariantsBulkInput!]!) "
+                "{ productVariantsBulkUpdate(productId: $productId, variants: $variants) "
+                "{ productVariants { id } userErrors { field message } } }")
+    return run_bulk_mutation(lines, mutation, len(priced), 'price update')
 
 
 def poll_bulk_mutation(expected_count: int) -> Tuple[bool, int]:
     """Poll bulk mutation until complete"""
     log("Polling for bulk mutation completion...")
-    
+
     query = """
     query {
       currentBulkOperation {
@@ -1098,32 +1050,31 @@ def poll_bulk_mutation(expected_count: int) -> Tuple[bool, int]:
       }
     }
     """
-    
+
     start_time = time.time()
-    
+
     while time.time() - start_time < MAX_POLL_TIME:
         result = graphql_request(query, use_rate_limit=False)
         operation = result.get('data', {}).get('currentBulkOperation')
-        
+
         if not operation:
             time.sleep(POLL_INTERVAL)
             continue
-        
+
         status = operation.get('status')
-        count = operation.get('objectCount', 0)
         root_count = operation.get('rootObjectCount', 0)
-        
+
         log(f"  Status: {status}, processed: {root_count}/{expected_count}")
-        
+
         if status == 'COMPLETED':
             log(f"✓ Bulk operation completed! Processed {root_count} products")
             return True, root_count
         elif status in ['FAILED', 'CANCELED']:
             log(f"Bulk operation failed: {operation.get('errorCode')}", 'WARNING')
             return False, 0
-        
+
         time.sleep(POLL_INTERVAL)
-    
+
     log("Bulk operation timed out", 'WARNING')
     return False, 0
 
@@ -1132,18 +1083,18 @@ def batch_process(products: List[Dict], operation: str, func) -> int:
     """Process products in batches with concurrent requests"""
     if not products:
         return 0
-    
+
     log(f"\n{operation} {len(products)} products...")
-    
+
     successful = 0
     failed = 0
     CHUNK_SIZE = 50  # Report progress every 50 products
-    
+
     start_time = time.time()
-    
+
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
         futures = {executor.submit(func, p): p for p in products}
-        
+
         for i, future in enumerate(as_completed(futures), 1):
             try:
                 result = future.result()
@@ -1154,65 +1105,100 @@ def batch_process(products: List[Dict], operation: str, func) -> int:
             except Exception as e:
                 failed += 1
                 log(f"Error: {e}", 'WARNING')
-            
-            # Progress update every CHUNK_SIZE products
+
             if i % CHUNK_SIZE == 0 or i == len(products):
                 elapsed = time.time() - start_time
                 rate = i / elapsed if elapsed > 0 else 0
                 remaining = (len(products) - i) / rate if rate > 0 else 0
                 log(f"  Progress: {i}/{len(products)} ({successful} ok, {failed} failed) - {rate:.1f}/sec, ~{remaining:.0f}s remaining")
-    
+
     log(f"✓ {operation} complete: {successful} successful, {failed} failed")
     return successful
 
-
 # =============================================================================
-# ARCHIVE MISSING PRODUCTS
+# ARCHIVE MISSING PRODUCTS (+ 301 redirects for the dead URLs)
 # =============================================================================
 
-def archive_product(sku: str, existing: Dict) -> bool:
-    """Archive a single product (set to DRAFT)"""
-    if existing.get('status') == 'DRAFT':
-        return True  # Already archived
-    
-    if DRY_RUN:
-        return True
-    
+_collection_handle_cache: Dict[str, bool] = {}
+
+def collection_exists(handle: str) -> bool:
+    if handle in _collection_handle_cache:
+        return _collection_handle_cache[handle]
+    query = """
+    query ($handle: String!) {
+        collectionByHandle(handle: $handle) { id }
+    }
+    """
+    result = graphql_request(query, {'handle': handle})
+    exists = bool(result.get('data', {}).get('collectionByHandle'))
+    _collection_handle_cache[handle] = exists
+    return exists
+
+def redirect_target_for(existing: Dict, known_handles: Set[str]) -> str:
+    """Pick the collection page for the product's category; homepage fallback."""
+    for tag in existing.get('tags', []):
+        if tag in known_handles and collection_exists(tag):
+            return f"/collections/{tag}"
+    return "/"
+
+def create_url_redirect(path: str, target: str) -> bool:
     mutation = """
-    mutation productUpdate($input: ProductInput!) {
-        productUpdate(input: $input) {
-            product { id }
+    mutation urlRedirectCreate($urlRedirect: UrlRedirectInput!) {
+        urlRedirectCreate(urlRedirect: $urlRedirect) {
+            urlRedirect { id }
             userErrors { field message }
         }
     }
     """
-    
-    result = graphql_request(mutation, {
-        'input': {
+    result = graphql_request(mutation, {'urlRedirect': {'path': path, 'target': target}})
+    errors = result.get('data', {}).get('urlRedirectCreate', {}).get('userErrors', [])
+    if errors:
+        # "already exists" is fine — the redirect is in place
+        if any('exists' in (e.get('message') or '').lower() for e in errors):
+            return True
+        log(f"Redirect {path} failed: {errors}", 'WARNING')
+        return False
+    return True
+
+def archive_product(sku: str, existing: Dict, known_handles: Set[str]) -> bool:
+    """Archive a product (set to DRAFT) and 301-redirect its URL to the
+    matching collection so Google doesn't accumulate 404s."""
+    if existing.get('status') == 'DRAFT':
+        return True  # Already archived
+
+    if DRY_RUN:
+        return True
+
+    result = graphql_request(PRODUCT_UPDATE_MUTATION, {
+        'product': {
             'id': existing['product_id'],
             'status': 'DRAFT'
         }
     })
-    
-    return bool(result.get('data', {}).get('productUpdate', {}).get('product'))
+
+    ok = bool(result.get('data', {}).get('productUpdate', {}).get('product'))
+    if ok and existing.get('handle'):
+        target = redirect_target_for(existing, known_handles)
+        create_url_redirect(f"/products/{existing['handle']}", target)
+    return ok
 
 
-def archive_missing_products(missing_skus: List[str], existing_products: Dict[str, Dict]) -> int:
+def archive_missing_products(missing_skus: List[str], existing_products: Dict[str, Dict],
+                             known_handles: Set[str]) -> int:
     """Archive products no longer in CSV"""
     if not missing_skus or not ARCHIVE_MISSING:
         return 0
-    
-    log(f"\nArchiving {len(missing_skus)} missing products...")
-    
+
+    log(f"\nArchiving {len(missing_skus)} missing products (with 301 redirects)...")
+
     archived = 0
     for sku in missing_skus:
         existing = existing_products.get(sku)
-        if existing and archive_product(sku, existing):
+        if existing and archive_product(sku, existing, known_handles):
             archived += 1
-    
+
     log(f"✓ Archived {archived} products")
     return archived
-
 
 # =============================================================================
 # MAIN
@@ -1220,42 +1206,43 @@ def archive_missing_products(missing_skus: List[str], existing_products: Dict[st
 
 def main():
     start_time = time.time()
-    
+
     log("=" * 70)
-    log("JohnnyVac to Shopify Sync v3.4 - MPN METAFIELD SUPPORT")
+    log("JohnnyVac to Shopify Sync v4.0 - CONTENT, SEO & INVENTORY OVERHAUL")
     log("=" * 70)
-    log("Using productSet for creates, productUpdate+productVariantsBulkUpdate for updates")
-    log("MPN metafield (custom.mpn) set from JohnnyVac SKU on all products")
-    
+    log("Inventory + price sync fixed | descriptions protected | SEO + taxonomy + brand set")
+    log(f"AI descriptions: {'ENABLED (Claude API)' if ai_available() else 'disabled (no ANTHROPIC_API_KEY — using templates)'}")
+
     if DRY_RUN:
         log("🔸 DRY RUN MODE - No changes will be made", 'WARNING')
-    
+
     if not SHOPIFY_ACCESS_TOKEN:
         log("Error: SHOPIFY_ACCESS_TOKEN not set", 'ERROR')
         return
-    
+
     # Step 1: Initialize categorizer
-    log("\n[1/7] Initializing categorization system...")
+    log("\n[1/8] Initializing categorization system...")
     categorizer = ProductCategorizer('category_map_v4.json')
-    
+    known_handles = set(categorizer.category_by_handle.keys())
+
     # Step 2: Fetch CSV
-    log("\n[2/7] Fetching CSV data...")
+    log("\n[2/8] Fetching CSV data...")
     csv_products, duplicate_skus = fetch_csv_data()
-    
+
     # Step 3: Categorize
-    log("\n[3/7] Categorizing products...")
+    log("\n[3/8] Categorizing products...")
     categorized_products, skipped_products = categorizer.batch_categorize(
         csv_products, language=LANGUAGE, skip_placeholders=True
     )
     log(f"✓ Categorized {len(categorized_products)} products")
     log(f"  Skipped {len(skipped_products)} placeholder products")
-    
+
     # Export reports
     categorizer.export_needs_review(categorized_products, 'needs_review.csv')
     categorizer.export_skipped(skipped_products, 'skipped_products.csv')
-    
+
     # Step 4: Fetch existing products (using bulk query - fast!)
-    log("\n[4/7] Fetching existing Shopify products...")
+    log("\n[4/8] Fetching existing Shopify products...")
     fetch_start = time.time()
     try:
         existing_products = get_existing_products_bulk()
@@ -1264,28 +1251,34 @@ def main():
         existing_products = get_existing_products_paginated()
     fetch_time = time.time() - fetch_start
     log(f"  Fetch completed in {fetch_time:.1f}s")
-    
+
     # Step 5: Calculate delta
-    log("\n[5/7] Calculating delta...")
+    log("\n[5/8] Calculating delta...")
     to_create, to_update, unchanged, missing_skus = calculate_delta(
-        categorized_products, existing_products
+        categorized_products, existing_products, known_handles
     )
-    
-    # Step 6: Execute sync
-    log("\n[6/7] Syncing to Shopify...")
+
+    # Step 6: Generate descriptions for new/thin products (AI or templates)
+    log("\n[6/8] Generating descriptions for new/thin products...")
+    generate_missing_descriptions(to_create + to_update)
+
+    # Step 7: Execute sync
+    log("\n[7/8] Syncing to Shopify...")
     sync_start = time.time()
-    
+
     created = 0
     updated = 0
-    
+    inventoried = 0
+
     if DRY_RUN:
         log(f"[DRY RUN] Would create {len(to_create)} products")
         log(f"[DRY RUN] Would update {len(to_update)} products")
         created = len(to_create)
         updated = len(to_update)
+        inventoried = sync_inventory_quantities(to_update)
     else:
         # Try bulk operations first, fall back to individual if they fail
-        
+
         if to_create:
             success, count = try_bulk_create(to_create)
             if success:
@@ -1293,24 +1286,39 @@ def main():
             else:
                 log("Falling back to individual creates...")
                 created = batch_process(to_create, "Creating", create_product)
-        
+
         if to_update:
             success, count = try_bulk_update(to_update)
             if success:
                 updated = count
+                price_ok, _ = try_bulk_price_update(to_update)
+                if not price_ok:
+                    log("Bulk price update failed — applying prices individually...")
+                    priced = [p for p in to_update if p.get('_flags', {}).get('price')]
+                    def apply_price(p):
+                        result = graphql_request(VARIANT_PRICE_MUTATION, {
+                            "productId": p['_existing']['product_id'],
+                            "variants": [{"id": p['_existing']['variant_id'],
+                                          "price": p['_desired']['price']}]
+                        })
+                        return not result.get('data', {}).get('productVariantsBulkUpdate', {}).get('userErrors', [])
+                    batch_process(priced, "Pricing", apply_price)
             else:
                 log("Falling back to individual updates...")
                 updated = batch_process(to_update, "Updating", update_product)
-    
+
+        # Inventory quantities (creates already get theirs via productSet)
+        inventoried = sync_inventory_quantities(to_update)
+
     sync_time = time.time() - sync_start
-    
-    # Step 7: Archive missing
-    log("\n[7/7] Archiving missing products...")
-    archived = archive_missing_products(missing_skus, existing_products)
-    
+
+    # Step 8: Archive missing
+    log("\n[8/8] Archiving missing products...")
+    archived = archive_missing_products(missing_skus, existing_products, known_handles)
+
     # Summary
     total_time = time.time() - start_time
-    
+
     log("\n" + "=" * 70)
     log("SYNC COMPLETE")
     log("=" * 70)
@@ -1318,14 +1326,14 @@ def main():
     log(f"\nResults:")
     log(f"  ✅ Created: {created}")
     log(f"  ✏️  Updated: {updated}")
-    log(f"  ⏭️  Unchanged: {len(unchanged)}")
-    log(f"  🗑️  Archived: {archived}")
+    log(f"  📦 Inventory synced: {inventoried}")
+    log(f"  ⏭️  Unchanged: {len(unchanged)} (skipping)")
+    log(f"  🗑️  Archived: {archived} (with 301 redirects)")
     log(f"  ⛔ Skipped: {len(skipped_products)}")
     log(f"\nPerformance:")
     log(f"  Fetch existing: {fetch_time:.1f}s (bulk query)")
     log(f"  Sync operations: {sync_time:.1f}s")
-    log(f"\nMPN metafield: custom.mpn set from JohnnyVac SKU on all synced products")
-    
+
     if DRY_RUN:
         log("\n🔸 DRY RUN - No actual changes were made")
 

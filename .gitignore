@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.jsonl
+needs_review.csv
+skipped_products.csv
+seo_results*.csv
+description_results.csv

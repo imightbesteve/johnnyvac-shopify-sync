@@ -46,7 +46,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests anthropic
 
       - name: Validate configuration files
         run: |
@@ -76,6 +76,8 @@ jobs:
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-8' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           ARCHIVE_MISSING: ${{ github.event.inputs.archive_missing || 'true' }}
         run: |
