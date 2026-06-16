@@ -1,0 +1,72 @@
+name: Update Collections
+
+# Runs ONLY the collection creator/enricher (create_collections.py), so you
+# can refresh collection descriptions + SEO without triggering the full
+# product sync.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: true
+        default: 'dry-run'
+        type: choice
+        options:
+          - 'dry-run'
+          - 'live'
+      enrich_existing:
+        description: 'Enrich existing collections (fill thin descriptions)'
+        required: false
+        default: true
+        type: boolean
+      auto_publish:
+        description: 'Auto-publish newly created collections'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  update-collections:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests anthropic
+
+      - name: Run collection updater
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-8' }}
+          AUTO_PUBLISH: ${{ inputs.auto_publish }}
+          ENRICH_COLLECTIONS: ${{ inputs.enrich_existing }}
+          DRY_RUN: ${{ inputs.mode == 'dry-run' }}
+        run: |
+          if [ "${{ inputs.mode }}" == "live" ]; then
+            echo "⚡ LIVE — collections will be created/updated"
+          else
+            echo "🔍 DRY RUN — preview only"
+          fi
+          python -u create_collections.py
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Update Collections"
+            echo ""
+            echo "- Mode: ${{ inputs.mode }}"
+            echo "- Enrich existing: ${{ inputs.enrich_existing }}"
+            echo "- ⏰ $(date -u)"
+          } >> $GITHUB_STEP_SUMMARY
