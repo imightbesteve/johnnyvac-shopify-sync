@@ -1136,3 +1136,184 @@ TAXONOMY_BY_HANDLE = {
 
 def taxonomy_for_handle(handle: str) -> Optional[str]:
     return TAXONOMY_BY_HANDLE.get(handle)
+
+
+# =============================================================================
+# COLLECTION CONTENT (descriptions + SEO for category/collection pages)
+# =============================================================================
+# Collection pages are a primary ranking surface. A grid with a one-line stub
+# is thin content (Google "crawled - currently not indexed"); these give each
+# collection two real paragraphs plus SEO meta.
+
+# Per top-level group, the angle the intro takes.
+_COLLECTION_GROUP_INTRO = {
+    "Parts & Replacement Parts":
+        "Keep your equipment running with replacement {leaf_l}. We stock {leaf_l} "
+        "for the commercial vacuums and cleaning machines used across Canadian "
+        "facilities — matched to the major brands so you can find the right fit by "
+        "model or part number.",
+    "Consumables":
+        "Stock your facility with {leaf_l}. These are the everyday {leaf_l} that "
+        "keep commercial washrooms, kitchens, and floors running — bought by the "
+        "case and shipped across Canada.",
+    "Tools & Accessories":
+        "Equip your cleaning crew with {leaf_l}. Durable, professional-grade "
+        "{leaf_l} built for the demands of daily commercial cleaning.",
+    "Equipment & Machines":
+        "Browse commercial {leaf_l} for professional cleaning. From single sites "
+        "to large facilities, these {leaf_l} are built for the workloads Canadian "
+        "businesses put them through.",
+    "Ops & Safety":
+        "Protect your team with {leaf_l}. Workplace safety supplies for cleaning "
+        "and maintenance crews, in stock and ready to ship across Canada.",
+}
+
+_COLLECTION_GROUP_BODY = {
+    "Parts & Replacement Parts":
+        "Replacing a worn part on schedule restores performance and extends the "
+        "life of the machine — far cheaper than running equipment into the ground. "
+        "Browse the range below by brand and model.",
+    "Consumables":
+        "Buying consumables in volume keeps per-unit costs down and avoids running "
+        "out mid-shift. Browse the options below to stock your facility.",
+    "Tools & Accessories":
+        "The right tool makes a cleaning crew faster and the result more "
+        "consistent. Browse the selection below for your operation.",
+    "Equipment & Machines":
+        "Choosing the right machine for your floor type and square footage pays off "
+        "in labour saved on every clean. Browse the models below, and reach out if "
+        "you'd like help matching a machine to your site.",
+    "Ops & Safety":
+        "Meeting workplace safety requirements protects your staff and your "
+        "business. Browse the range below for your team.",
+}
+
+_COLLECTION_CTA = (
+    "Available from Kingsway Janitorial — a Vancouver-based janitorial supplier "
+    "serving Canadian businesses since 1990, with fast shipping coast to coast."
+)
+
+
+def _collection_parts(product_type: str, title: str) -> tuple:
+    segs = [s.strip() for s in (product_type or title or '').split('>')]
+    group = segs[0] if segs else 'Tools & Accessories'
+    leaf = (segs[-1] if segs else title) or title
+    return group, leaf
+
+
+def generate_collection_description_template(product_type: str, title: str = '',
+                                             count: Optional[int] = None) -> str:
+    group, leaf = _collection_parts(product_type, title)
+    leaf_l = leaf.lower()
+    intro = _COLLECTION_GROUP_INTRO.get(group, _COLLECTION_GROUP_INTRO["Tools & Accessories"])
+    body = _COLLECTION_GROUP_BODY.get(group, _COLLECTION_GROUP_BODY["Tools & Accessories"])
+    p1 = intro.format(leaf_l=leaf_l)
+    count_note = ""
+    if count and count >= 5:
+        count_note = f"This collection brings together {count} {leaf_l} in one place. "
+    p2 = f"{count_note}{body} {_COLLECTION_CTA}"
+    p1 = re.sub(r'\s+', ' ', p1).strip()
+    p2 = re.sub(r'\s+', ' ', p2).strip()
+    return f"<p>{p1}</p>\n<p>{p2}</p>"
+
+
+def generate_collection_seo(product_type: str, title: str = '') -> tuple:
+    """Returns (seo_title, seo_description), each within Google's limits."""
+    group, leaf = _collection_parts(product_type, title)
+    seo_title = f"{leaf} | Kingsway Janitorial"
+    if len(seo_title) > MAX_SEO_TITLE:
+        seo_title = truncate_text(leaf, MAX_SEO_TITLE)
+    leaf_l = leaf.lower()
+    desc = (f"Shop commercial {leaf_l} at Kingsway Janitorial. Professional-grade, "
+            f"in stock, fast shipping across Canada.")
+    if len(desc) > MAX_SEO_DESCRIPTION:
+        desc = truncate_text(desc, MAX_SEO_DESCRIPTION)
+    return seo_title, desc
+
+
+COLLECTION_AI_SYSTEM_PROMPT = """You write category-page (collection) descriptions for Kingsway Janitorial, a Vancouver-based commercial cleaning and janitorial supplier shipping across Canada. Each collection groups one product category (e.g. vacuum filters, mops & buckets, automatic scrubbers).
+
+For each collection you receive, write a unique description as exactly two short paragraphs (60-110 words total):
+- Paragraph 1: what this category is and who buys it / what problem it solves for a commercial buyer.
+- Paragraph 2: a practical buying consideration for the category, then a short closing line about availability from Kingsway Janitorial with shipping across Canada. Vary that closing line between collections.
+
+Rules:
+- Use ONLY the category name and group provided. Do not invent brands, specs, counts, or claims.
+- Write for commercial/professional buyers; plain, confident language. No hype words, no exclamation marks, no keyword stuffing.
+- Vary structure and wording across collections so they don't read as copies.
+- Plain text only per paragraph (no HTML, no markdown, no lists)."""
+
+COLLECTION_AI_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "collections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string"},
+                    "paragraph1": {"type": "string"},
+                    "paragraph2": {"type": "string"},
+                },
+                "required": ["handle", "paragraph1", "paragraph2"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["collections"],
+    "additionalProperties": False,
+}
+
+
+def generate_collection_descriptions_ai(items: List[Dict], model: str = None) -> Dict[str, str]:
+    """items: [{'handle', 'title', 'product_type'}]. Returns {handle: html}."""
+    if not items or not ai_available():
+        return {}
+    try:
+        import anthropic
+    except ImportError:
+        _log("anthropic package not installed — collection descriptions use templates", 'WARNING')
+        return {}
+
+    client = anthropic.Anthropic()
+    model = model or AI_MODEL
+    lines = []
+    for it in items:
+        group, leaf = _collection_parts(it.get('product_type', ''), it.get('title', ''))
+        lines.append(f"- handle: {it['handle']} | Category: {leaf} | Group: {group}")
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=8000,
+            system=COLLECTION_AI_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": "Write descriptions for these collections:\n" + "\n".join(lines)}],
+            output_config={"format": {"type": "json_schema", "schema": COLLECTION_AI_SCHEMA}},
+        )
+        if response.stop_reason == "refusal":
+            _log("Collection description request refused — using templates", 'WARNING')
+            return {}
+        text = next((b.text for b in response.content if b.type == "text"), "")
+        data = json.loads(text)
+        wanted = {it['handle'] for it in items}
+        out = {}
+        for c in data.get('collections', []):
+            h = c.get('handle', '')
+            if h not in wanted:
+                continue
+            p1 = html_lib.escape((c.get('paragraph1') or '').strip(), quote=False)
+            p2 = html_lib.escape((c.get('paragraph2') or '').strip(), quote=False)
+            if len(p1) + len(p2) < 60:
+                continue
+            out[h] = f"<p>{p1}</p>\n<p>{p2}</p>" if p2 else f"<p>{p1}</p>"
+        return out
+    except Exception as e:
+        _log(f"Collection AI descriptions failed ({e}) — using templates", 'WARNING')
+        return {}
+
+
+def build_collection_description(product_type: str, title: str = '',
+                                 count: Optional[int] = None, ai_desc: str = None) -> str:
+    if ai_desc:
+        return ai_desc
+    return generate_collection_description_template(product_type, title, count)
+

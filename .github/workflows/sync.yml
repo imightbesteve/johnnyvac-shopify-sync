@@ -108,7 +108,10 @@ jobs:
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-8' }}
           AUTO_PUBLISH: ${{ github.event.inputs.auto_publish }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: |
           echo "Creating / updating Shopify automated collections..."
           python create_collections.py

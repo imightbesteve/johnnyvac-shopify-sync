@@ -25,7 +25,18 @@ from datetime import datetime
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', '')
 SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 AUTO_PUBLISH = os.environ.get('AUTO_PUBLISH', 'false').lower() == 'true'
+DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
+# When true, fill description + SEO on existing collections too (only when the
+# existing description is thin — manual edits are preserved).
+ENRICH_EXISTING = os.environ.get('ENRICH_COLLECTIONS', 'true').lower() == 'true'
+# A collection description with fewer than this many text chars counts as thin.
+MIN_COLLECTION_DESC_LENGTH = 120
 CATEGORY_MAP_FILE = 'category_map_v4.json'
+
+from product_content import (
+    ai_available, build_collection_description, generate_collection_descriptions_ai,
+    generate_collection_seo, strip_html,
+)
 
 API_VERSION = '2026-01'
 GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json"
@@ -144,6 +155,8 @@ def collection_exists_by_handle(handle: str) -> Optional[Dict]:
         id
         handle
         title
+        descriptionHtml
+        seo { title description }
         productsCount {
           count
         }
@@ -374,6 +387,74 @@ def publish_collection(collection_gid: str) -> bool:
         return False
 
 
+def update_collection_content(collection_gid: str, description_html: str,
+                              seo_title: str, seo_description: str) -> bool:
+    """Set descriptionHtml + SEO on an existing collection."""
+    mutation = '''
+    mutation collectionUpdate($input: CollectionInput!) {
+      collectionUpdate(input: $input) {
+        collection { id }
+        userErrors { field message }
+      }
+    }
+    '''
+    variables = {"input": {
+        "id": collection_gid,
+        "descriptionHtml": description_html,
+        "seo": {"title": seo_title, "description": seo_description},
+    }}
+    try:
+        response = requests.post(GRAPHQL_URL, headers=HEADERS,
+                                 json={"query": mutation, "variables": variables}, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        if 'errors' in result:
+            log(f"  ⚠️  Update errors: {result['errors']}")
+            return False
+        errs = result.get('data', {}).get('collectionUpdate', {}).get('userErrors', [])
+        if errs:
+            log(f"  ⚠️  Update user errors: {errs}")
+            return False
+        return True
+    except Exception as e:
+        log(f"  ⚠️  Error updating collection: {e}")
+        return False
+
+
+def needs_description(existing: Dict) -> bool:
+    """True when the collection's description is thin enough to (re)generate."""
+    return len(strip_html(existing.get('descriptionHtml', '') or '')) < MIN_COLLECTION_DESC_LENGTH
+
+
+def precompute_collection_descriptions(categories: List[Dict],
+                                       product_counts: Dict[str, int]) -> Dict[str, str]:
+    """One batched AI pass for every collection that will need a description
+    (new ones + existing thin ones). Returns {handle: html}. Empty when no AI
+    key — the per-collection template path fills in instead."""
+    if not (ai_available() and not DRY_RUN):
+        return {}
+    items = []
+    for category in categories:
+        product_type = category['productType']
+        handle = category['handle']
+        if product_counts.get(product_type, 0) < category.get('min_products', 1):
+            continue
+        existing = collection_exists_by_handle(handle)
+        time.sleep(RATE_LIMIT_DELAY)
+        if existing and not (ENRICH_EXISTING and needs_description(existing)):
+            continue
+        items.append({'handle': handle,
+                      'title': category.get('title', product_type.split(' > ')[-1]),
+                      'product_type': product_type})
+    if not items:
+        return {}
+    log(f"Generating AI descriptions for {len(items)} collections (Claude API)...")
+    out = generate_collection_descriptions_ai(items)
+    log(f"✓ AI generated {len(out)} collection descriptions "
+        f"({len(items) - len(out)} will use templates)")
+    return out
+
+
 def create_collections(categories: List[Dict], product_counts: Dict[str, int]):
     """Create collections for categories meeting minimum thresholds"""
     log("")
@@ -383,47 +464,72 @@ def create_collections(categories: List[Dict], product_counts: Dict[str, int]):
     log("")
     
     created = 0
+    enriched = 0
     skipped_exists = 0
     skipped_threshold = 0
     failed = 0
-    
+
+    engine = 'Claude AI' if (ai_available() and not DRY_RUN) else 'templates'
+    log(f"Description engine: {engine} | Enrich existing: {ENRICH_EXISTING} | Dry run: {DRY_RUN}")
+    log("")
+
+    # One batched AI pass up front; template path fills any gaps per-collection.
+    ai_descriptions = precompute_collection_descriptions(categories, product_counts)
+
     for category in categories:
         product_type = category['productType']
         handle = category['handle']
         title = category.get('title', product_type.split(' > ')[-1])
         min_products = category.get('min_products', 1)
-        
-        # Get actual product count
+
         actual_count = product_counts.get(product_type, 0)
-        
+
         log(f"📦 {product_type}")
         log(f"   Handle: {handle}")
         log(f"   Products: {actual_count} (min: {min_products})")
-        
-        # Skip if below threshold
+
         if actual_count < min_products:
             log(f"   ⏭️  Skipped (below threshold)")
             skipped_threshold += 1
             continue
-        
-        # Check if already exists
+
+        description = build_collection_description(
+            product_type, title, count=actual_count, ai_desc=ai_descriptions.get(handle))
+        seo_title, seo_desc = generate_collection_seo(product_type, title)
+
         existing = collection_exists_by_handle(handle)
         if existing:
             count = existing.get('productsCount', 0)
-            log(f"   ✅ Already exists ({count} products)")
-            skipped_exists += 1
+            if ENRICH_EXISTING and needs_description(existing):
+                if DRY_RUN:
+                    log(f"   📝 [DRY RUN] Would enrich thin description ({count} products)")
+                    enriched += 1
+                elif update_collection_content(existing['id'], description, seo_title, seo_desc):
+                    log(f"   📝 Enriched description + SEO ({count} products)")
+                    enriched += 1
+                else:
+                    log(f"   ⚠️  Enrich failed")
+                    failed += 1
+            else:
+                log(f"   ✅ Already exists, description OK ({count} products)")
+                skipped_exists += 1
             time.sleep(RATE_LIMIT_DELAY)
             continue
-        
-        # Create collection
+
+        # Create collection (with rich description from the start)
+        if DRY_RUN:
+            log(f"   🔨 [DRY RUN] Would create with rich description")
+            created += 1
+            time.sleep(RATE_LIMIT_DELAY)
+            continue
+
         log(f"   🔨 Creating...")
-        collection = create_automated_collection(title, handle, product_type)
-        
+        collection = create_automated_collection(title, handle, product_type, description)
+
         if collection:
             created += 1
             log(f"   ✅ Created: {collection['handle']}")
-            
-            # Publish if AUTO_PUBLISH is set
+            update_collection_content(collection['id'], description, seo_title, seo_desc)
             if AUTO_PUBLISH:
                 log(f"   📢 Publishing...")
                 if publish_collection(collection['id']):
@@ -433,16 +539,16 @@ def create_collections(categories: List[Dict], product_counts: Dict[str, int]):
         else:
             failed += 1
             log(f"   ❌ Failed")
-        
-        # Rate limiting
+
         time.sleep(RATE_LIMIT_DELAY)
-    
+
     # Summary
     log("")
     log("=" * 70)
     log("SUMMARY")
     log("=" * 70)
     log(f"✅ Created:             {created}")
+    log(f"📝 Enriched (existing): {enriched}")
     log(f"⏭️  Skipped (exists):    {skipped_exists}")
     log(f"⏭️  Skipped (threshold): {skipped_threshold}")
     log(f"❌ Failed:              {failed}")
