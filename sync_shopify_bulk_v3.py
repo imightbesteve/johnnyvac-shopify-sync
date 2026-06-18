@@ -67,6 +67,11 @@ ARCHIVE_MISSING = os.environ.get('ARCHIVE_MISSING', 'true').lower() == 'true'
 # time stock flips). Set KEEP_OOS_ACTIVE=false to restore the old behavior.
 KEEP_OOS_ACTIVE = os.environ.get('KEEP_OOS_ACTIVE', 'true').lower() == 'true'
 
+# Create 301 redirects (archived product URL -> its collection) when archiving.
+# Requires the write_online_store_navigation scope on the access token; if the
+# scope is missing, redirects are skipped automatically (archiving still runs).
+CREATE_REDIRECTS = os.environ.get('CREATE_REDIRECTS', 'true').lower() == 'true'
+
 # Description shorter than this (text chars) counts as "thin" and gets enriched
 MIN_DESCRIPTION_LENGTH = 80
 
@@ -1120,6 +1125,9 @@ def batch_process(products: List[Dict], operation: str, func) -> int:
 # =============================================================================
 
 _collection_handle_cache: Dict[str, bool] = {}
+# Flips to True if the token lacks write_online_store_navigation, so we stop
+# attempting redirects (and log once) instead of failing on every archive.
+_redirects_disabled = False
 
 def collection_exists(handle: str) -> bool:
     if handle in _collection_handle_cache:
@@ -1142,6 +1150,13 @@ def redirect_target_for(existing: Dict, known_handles: Set[str]) -> str:
     return "/"
 
 def create_url_redirect(path: str, target: str) -> bool:
+    """Create a 301 redirect. Returns False (and disables further attempts) if
+    the token lacks the write_online_store_navigation scope, rather than
+    crashing the archive pass."""
+    global _redirects_disabled
+    if _redirects_disabled:
+        return False
+
     mutation = """
     mutation urlRedirectCreate($urlRedirect: UrlRedirectInput!) {
         urlRedirectCreate(urlRedirect: $urlRedirect) {
@@ -1151,7 +1166,22 @@ def create_url_redirect(path: str, target: str) -> bool:
     }
     """
     result = graphql_request(mutation, {'urlRedirect': {'path': path, 'target': target}})
-    errors = result.get('data', {}).get('urlRedirectCreate', {}).get('userErrors', [])
+
+    # Access-denied (missing scope) comes back as top-level errors with data: null.
+    top_errors = result.get('errors') or []
+    if top_errors:
+        if 'write_online_store_navigation' in json.dumps(top_errors):
+            _redirects_disabled = True
+            log("urlRedirectCreate denied — token is missing the "
+                "'write_online_store_navigation' scope. Skipping all redirects "
+                "this run; products are still archived. Add the scope to enable "
+                "301 redirects.", 'WARNING')
+        else:
+            log(f"Redirect {path} error: {top_errors}", 'WARNING')
+        return False
+
+    payload = (result.get('data') or {}).get('urlRedirectCreate') or {}
+    errors = payload.get('userErrors', [])
     if errors:
         # "already exists" is fine — the redirect is in place
         if any('exists' in (e.get('message') or '').lower() for e in errors):
@@ -1162,7 +1192,8 @@ def create_url_redirect(path: str, target: str) -> bool:
 
 def archive_product(sku: str, existing: Dict, known_handles: Set[str]) -> bool:
     """Archive a product (set to DRAFT) and 301-redirect its URL to the
-    matching collection so Google doesn't accumulate 404s."""
+    matching collection so Google doesn't accumulate 404s. A redirect failure
+    never blocks the archive."""
     if existing.get('status') == 'DRAFT':
         return True  # Already archived
 
@@ -1176,10 +1207,13 @@ def archive_product(sku: str, existing: Dict, known_handles: Set[str]) -> bool:
         }
     })
 
-    ok = bool(result.get('data', {}).get('productUpdate', {}).get('product'))
-    if ok and existing.get('handle'):
-        target = redirect_target_for(existing, known_handles)
-        create_url_redirect(f"/products/{existing['handle']}", target)
+    ok = bool((result.get('data') or {}).get('productUpdate', {}).get('product'))
+    if ok and CREATE_REDIRECTS and not _redirects_disabled and existing.get('handle'):
+        try:
+            target = redirect_target_for(existing, known_handles)
+            create_url_redirect(f"/products/{existing['handle']}", target)
+        except Exception as e:
+            log(f"Redirect for {sku} skipped: {e}", 'WARNING')
     return ok
 
 
