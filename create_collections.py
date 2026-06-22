@@ -21,9 +21,11 @@ import time
 from typing import Dict, List, Optional
 from datetime import datetime
 
+from shopify_auth import get_access_token
+
 # Configuration
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', '')
-SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
+SHOPIFY_ACCESS_TOKEN = get_access_token() or ''
 AUTO_PUBLISH = os.environ.get('AUTO_PUBLISH', 'false').lower() == 'true'
 CATEGORY_MAP_FILE = 'category_map_v4.json'
 

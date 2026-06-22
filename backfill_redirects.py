@@ -23,8 +23,10 @@ Usage:
 
 Environment Variables:
     SHOPIFY_STORE: Store URL
-    SHOPIFY_ACCESS_TOKEN: Admin API access token (needs write_content /
-                          write_online_store_navigation for urlRedirectCreate)
+    SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET: preferred — mints a fresh token
+        via client_credentials that carries the app's current scopes (needs
+        write_online_store_navigation for urlRedirectCreate).
+    SHOPIFY_ACCESS_TOKEN: fallback static token when client creds aren't set.
 """
 
 import os
@@ -34,9 +36,11 @@ import requests
 import argparse
 from datetime import datetime
 
+from shopify_auth import get_access_token
+
 # Configuration
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', 'kingsway-janitorial.myshopify.com')
-SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
+SHOPIFY_ACCESS_TOKEN = get_access_token() or ''
 API_VERSION = '2026-01'
 GRAPHQL_URL = f'https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json'
 HEADERS = {
@@ -254,7 +258,8 @@ def main():
     log(f"Mode:  {'DRY RUN' if dry_run else 'LIVE'}")
 
     if not SHOPIFY_ACCESS_TOKEN:
-        log("SHOPIFY_ACCESS_TOKEN not set", 'ERROR')
+        log("No Shopify credentials — set SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET "
+            "(preferred) or SHOPIFY_ACCESS_TOKEN", 'ERROR')
         sys.exit(1)
 
     require_redirect_scope()
