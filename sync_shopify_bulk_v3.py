@@ -1151,12 +1151,56 @@ def create_url_redirect(path: str, target: str) -> bool:
     }
     """
     result = graphql_request(mutation, {'urlRedirect': {'path': path, 'target': target}})
+
+    # Top-level errors (e.g. access denied) never surface in userErrors, so an
+    # archive-redirect would otherwise fail silently. Flag the scope problem
+    # loudly — this is what let the GSC 404 backlog build up.
+    top_errors = result.get('errors') or []
+    if top_errors:
+        if any('access denied' in (e.get('message') or '').lower() for e in top_errors):
+            log(f"Redirect {path} DENIED — token is missing the "
+                f"write_online_store_navigation scope; the URL will 404 in Google", 'ERROR')
+        else:
+            log(f"Redirect {path} failed: {top_errors}", 'WARNING')
+        return False
+
     errors = result.get('data', {}).get('urlRedirectCreate', {}).get('userErrors', [])
     if errors:
         # "already exists" is fine — the redirect is in place
         if any('exists' in (e.get('message') or '').lower() for e in errors):
             return True
         log(f"Redirect {path} failed: {errors}", 'WARNING')
+        return False
+    return True
+
+
+def check_redirect_scope() -> bool:
+    """Verify the access token can write URL redirects before we rely on it.
+
+    Without write_online_store_navigation, every archive 301 fails silently and
+    discontinued product URLs pile up as 404s in Google. Warn loudly at startup
+    so a missing scope can't recur unnoticed."""
+    query = """
+    query {
+      currentAppInstallation {
+        accessScopes { handle }
+      }
+    }
+    """
+    result = graphql_request(query)
+    scopes = {
+        s.get('handle')
+        for s in (result.get('data', {})
+                        .get('currentAppInstallation', {})
+                        .get('accessScopes', []) or [])
+    }
+    if 'write_online_store_navigation' not in scopes:
+        log("=" * 70, 'WARNING')
+        log("MISSING SCOPE: write_online_store_navigation is NOT granted.", 'WARNING')
+        log("Archive 301 redirects will fail silently and discontinued product", 'WARNING')
+        log("URLs will 404 in Google Search Console. Add the scope to the app and", 'WARNING')
+        log("re-release / reinstall to update the access token.", 'WARNING')
+        log("=" * 70, 'WARNING')
         return False
     return True
 
@@ -1219,6 +1263,11 @@ def main():
     if not SHOPIFY_ACCESS_TOKEN:
         log("Error: SHOPIFY_ACCESS_TOKEN not set", 'ERROR')
         return
+
+    # Verify the token can write redirects; warn loudly if not (archive 301s
+    # fail silently without write_online_store_navigation).
+    if not DRY_RUN:
+        check_redirect_scope()
 
     # Step 1: Initialize categorizer
     log("\n[1/8] Initializing categorization system...")
