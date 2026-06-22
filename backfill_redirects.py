@@ -81,6 +81,38 @@ def graphql(query, variables=None):
     return {}
 
 
+def require_redirect_scope():
+    """Fail fast with a clear message if the token can't read/write redirects.
+
+    urlRedirect access needs read/write_online_store_navigation. Without it the
+    API returns data:null + an ACCESS_DENIED error, so check up front instead of
+    crashing mid-run."""
+    query = """
+    query {
+      currentAppInstallation {
+        accessScopes { handle }
+      }
+    }
+    """
+    result = graphql(query)
+    scopes = {
+        s.get('handle')
+        for s in ((result.get('data') or {})
+                  .get('currentAppInstallation', {})
+                  .get('accessScopes') or [])
+    }
+    missing = {'read_online_store_navigation', 'write_online_store_navigation'} - scopes
+    if missing:
+        log("=" * 60, 'ERROR')
+        log(f"MISSING SCOPE(S): {', '.join(sorted(missing))}", 'ERROR')
+        log("The access token cannot read/write URL redirects. Add", 'ERROR')
+        log("read_online_store_navigation + write_online_store_navigation to the", 'ERROR')
+        log("app, Release the version, reinstall so the token picks up the new", 'ERROR')
+        log("scopes, and update the SHOPIFY_ACCESS_TOKEN secret if it rotated.", 'ERROR')
+        log("=" * 60, 'ERROR')
+        sys.exit(1)
+
+
 def fetch_collection_handles():
     """All collection handles on the store — valid redirect targets."""
     log("Fetching collection handles...")
@@ -96,7 +128,7 @@ def fetch_collection_handles():
     cursor = None
     while True:
         result = graphql(query, {'cursor': cursor} if cursor else None)
-        data = result.get('data', {}).get('collections', {})
+        data = (result.get('data') or {}).get('collections') or {}
         for node in data.get('nodes', []):
             if node.get('handle'):
                 handles.add(node['handle'])
@@ -124,7 +156,7 @@ def fetch_existing_redirect_paths():
     cursor = None
     while True:
         result = graphql(query, {'cursor': cursor} if cursor else None)
-        data = result.get('data', {}).get('urlRedirects', {})
+        data = (result.get('data') or {}).get('urlRedirects') or {}
         for node in data.get('nodes', []):
             if node.get('path'):
                 paths.add(node['path'])
@@ -152,7 +184,7 @@ def fetch_draft_products():
     cursor = None
     while True:
         result = graphql(query, {'cursor': cursor} if cursor else None)
-        data = result.get('data', {}).get('products', {})
+        data = (result.get('data') or {}).get('products') or {}
         for node in data.get('nodes', []):
             products.append({
                 'id': node['id'],
@@ -225,6 +257,7 @@ def main():
         log("SHOPIFY_ACCESS_TOKEN not set", 'ERROR')
         sys.exit(1)
 
+    require_redirect_scope()
     collection_handles = fetch_collection_handles()
     existing_paths = fetch_existing_redirect_paths()
     drafts = fetch_draft_products()
