@@ -189,6 +189,15 @@ def create_url_redirect(path, target):
     }
     """
     result = graphql(mutation, {'urlRedirect': {'path': path, 'target': target}})
+    # Access-denied surfaces as a top-level error, not userErrors — flag it
+    # clearly so a missing write_online_store_navigation scope is obvious.
+    top_errors = result.get('errors') or []
+    if top_errors:
+        if any('access denied' in (e.get('message') or '').lower() for e in top_errors):
+            log(f"  {path} DENIED — token missing write_online_store_navigation scope", 'ERROR')
+        else:
+            log(f"  Redirect {path} failed: {top_errors}", 'WARNING')
+        return False
     errors = result.get('data', {}).get('urlRedirectCreate', {}).get('userErrors', [])
     if errors:
         # "already exists" is fine — the redirect is in place
