@@ -48,13 +48,16 @@ from product_content import (
     generate_descriptions_ai, generate_seo_description, generate_seo_title,
     strip_html, taxonomy_for_handle,
 )
+from shopify_auth import get_access_token
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', 'kingsway-janitorial.myshopify.com')
-SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
+# Prefer client_credentials (fresh token w/ current scopes); fall back to a
+# static SHOPIFY_ACCESS_TOKEN. See shopify_auth.py.
+SHOPIFY_ACCESS_TOKEN = get_access_token()
 CSV_URL = 'https://www.johnnyvacstock.com/sigm_all_jv_products/JVWebProducts.csv'
 IMAGE_BASE_URL = 'https://www.johnnyvacstock.com/photos/web/'
 
