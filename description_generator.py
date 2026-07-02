@@ -28,9 +28,12 @@ from product_content import (
     ai_available, build_description, generate_descriptions_ai,
     get_template_key, strip_html,
 )
+from shopify_auth import get_access_token
 
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', 'kingsway-janitorial.myshopify.com')
-SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
+# Prefer client_credentials (fresh token w/ current scopes); falls back to a
+# static SHOPIFY_ACCESS_TOKEN. See shopify_auth.py.
+SHOPIFY_ACCESS_TOKEN = get_access_token() or ''
 API_VERSION = '2026-01'
 MIN_DESCRIPTION_LENGTH = 80
 RATE_LIMIT_DELAY = 0.75
@@ -229,9 +232,9 @@ def main():
     parser.add_argument('--samples', type=int, default=10)
     args = parser.parse_args()
 
-    token = os.environ.get('SHOPIFY_ACCESS_TOKEN', SHOPIFY_ACCESS_TOKEN)
+    token = SHOPIFY_ACCESS_TOKEN
     if not token:
-        log("❌ SHOPIFY_ACCESS_TOKEN not set", 'ERROR')
+        log("❌ No Shopify credentials (set SHOPIFY_CLIENT_ID/SECRET or SHOPIFY_ACCESS_TOKEN)", 'ERROR')
         return
     store = os.environ.get('SHOPIFY_STORE', SHOPIFY_STORE)
 

@@ -1,6 +1,13 @@
 name: Generate Product Descriptions
 
 on:
+  # Weekly pass: upgrade thin descriptions with AI-written copy, 300 products
+  # per run. Requires the ANTHROPIC_API_KEY secret — scheduled runs skip
+  # (rather than template-overwrite) when it's missing, so products stay
+  # eligible for AI copy once the key is added.
+  schedule:
+    - cron: '0 8 * * 1'
+
   workflow_dispatch:
     inputs:
       mode:
@@ -50,31 +57,44 @@ jobs:
       - name: Run Description Generator
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-8' }}
         run: |
           ARGS="--export description_results.csv --samples 15"
 
-          if [ "${{ inputs.mode }}" == "live" ]; then
-            ARGS="$ARGS --live"
-            echo "⚡ Running in LIVE mode — descriptions will be updated"
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            if [ -z "$ANTHROPIC_API_KEY" ]; then
+              echo "⏭️ Scheduled run skipped: ANTHROPIC_API_KEY secret is not set."
+              echo "   Add it to enable weekly AI-written descriptions."
+              echo "## ⏭️ Skipped — ANTHROPIC_API_KEY secret not set" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+            echo "⚡ Scheduled weekly run — LIVE, AI engine, 300 products"
+            ARGS="$ARGS --live --limit 300"
           else
-            echo "🔍 Running in DRY RUN mode — preview only"
-          fi
+            if [ "${{ inputs.mode }}" == "live" ]; then
+              ARGS="$ARGS --live"
+              echo "⚡ Running in LIVE mode — descriptions will be updated"
+            else
+              echo "🔍 Running in DRY RUN mode — preview only"
+            fi
 
-          if [ -n "${{ inputs.min_length }}" ]; then
-            ARGS="$ARGS --min-length ${{ inputs.min_length }}"
-          fi
+            if [ -n "${{ inputs.min_length }}" ]; then
+              ARGS="$ARGS --min-length ${{ inputs.min_length }}"
+            fi
 
-          if [ -n "${{ inputs.limit }}" ]; then
-            ARGS="$ARGS --limit ${{ inputs.limit }}"
-            echo "📊 Limited to ${{ inputs.limit }} products"
-          fi
+            if [ -n "${{ inputs.limit }}" ]; then
+              ARGS="$ARGS --limit ${{ inputs.limit }}"
+              echo "📊 Limited to ${{ inputs.limit }} products"
+            fi
 
-          if [ "${{ inputs.engine }}" == "template" ]; then
-            ARGS="$ARGS --template"
-            echo "📝 Forcing template engine (no AI)"
+            if [ "${{ inputs.engine }}" == "template" ]; then
+              ARGS="$ARGS --template"
+              echo "📝 Forcing template engine (no AI)"
+            fi
           fi
 
           echo "Running: python3 description_generator.py $ARGS"
@@ -86,6 +106,7 @@ jobs:
         with:
           name: description-results-${{ github.run_number }}
           path: description_results.csv
+          if-no-files-found: ignore
           retention-days: 30
 
       - name: Show sample results

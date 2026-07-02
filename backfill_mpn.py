@@ -23,8 +23,10 @@ import argparse
 from datetime import datetime
 
 # Configuration
+from shopify_auth import get_access_token
+
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', 'kingsway-janitorial.myshopify.com')
-SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
+SHOPIFY_ACCESS_TOKEN = get_access_token() or ''
 API_VERSION = '2026-01'
 GRAPHQL_URL = f'https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json'
 HEADERS = {

@@ -45,6 +45,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from categorizer_v4 import ProductCategorizer
 from product_content import (
     ai_available, build_description, compute_vendor,
+    extract_brand, extract_compatible_models, extract_dimensions,
+    extract_material, extract_pack_quantity,
     generate_descriptions_ai, generate_seo_description, generate_seo_title,
     strip_html, taxonomy_for_handle,
 )
@@ -154,6 +156,12 @@ def graphql_request(query: str, variables: Optional[Dict] = None, use_rate_limit
             if 'errors' in result:
                 log(f"GraphQL errors: {result['errors']}", 'WARNING')
 
+            # Shopify nulls the whole `data` payload when a non-nullable field
+            # errors (e.g. ACCESS_DENIED on a missing scope). Normalize so
+            # callers' result.get('data', {}) chains don't crash on None.
+            if result.get('data') is None:
+                result['data'] = {}
+
             return result
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
@@ -186,16 +194,30 @@ def normalize_price(price_str: str) -> str:
     except (ValueError, TypeError):
         return "0.00"
 
-def build_metafields(sku: str) -> List[Dict]:
-    """custom.mpn = JohnnyVac SKU. Google accepts Brand + MPN instead of GTIN."""
+def build_metafields(desired: Dict) -> List[Dict]:
+    """Structured metadata extracted from the title/type, namespace `custom`.
+    custom.mpn = JohnnyVac SKU. Google accepts Brand + MPN instead of GTIN."""
+    title = desired.get('title', '')
     metafields = []
-    if sku:
-        metafields.append({
-            "namespace": "custom",
-            "key": "mpn",
-            "value": sku,
-            "type": "single_line_text_field"
-        })
+
+    def add(key: str, value, mtype: str = 'single_line_text_field'):
+        if value not in (None, '', []):
+            metafields.append({
+                "namespace": "custom",
+                "key": key,
+                "value": str(value),
+                "type": mtype
+            })
+
+    add('mpn', desired.get('sku', ''))
+    add('brand', extract_brand(title))
+    add('pack_quantity', extract_pack_quantity(title), 'number_integer')
+    add('material', extract_material(title))
+    add('compatible_models',
+        ', '.join(extract_compatible_models(title, desired.get('product_type', ''))))
+    specs = extract_dimensions(title)
+    add('size_inches', specs.get('size_inches'))
+    add('voltage', specs.get('voltage'))
     return metafields
 
 def merge_tags(existing_tags: List[str], managed_tags: List[str], known_handles: Set[str]) -> List[str]:
@@ -287,13 +309,16 @@ def get_default_location_id() -> Optional[str]:
     if _location_id_cache:
         return _location_id_cache
 
+    # Only ask for the id: `Location.name` requires the read_locations scope,
+    # which the client_credentials token (write_inventory,write_products)
+    # doesn't have — requesting it nulls the whole response and broke every
+    # scheduled sync from 2026-06-24 on.
     query = """
     query {
         locations(first: 1) {
             edges {
                 node {
                     id
-                    name
                 }
             }
         }
@@ -304,8 +329,10 @@ def get_default_location_id() -> Optional[str]:
     edges = result.get('data', {}).get('locations', {}).get('edges', [])
     if edges:
         _location_id_cache = edges[0]['node']['id']
-        log(f"Using location: {edges[0]['node']['name']} ({_location_id_cache})")
+        log(f"Using location: {_location_id_cache}")
         return _location_id_cache
+    log("Could not resolve a location — inventory quantities cannot be "
+        "written this run (check the app's access scopes)", 'ERROR')
     return None
 
 # =============================================================================
@@ -686,7 +713,7 @@ def build_create_input(product: Dict, location_id: Optional[str]) -> Dict:
         "vendor": d['vendor'],
         "status": d['status'],
         "tags": sorted(set(d['managed_tags'])),
-        "metafields": build_metafields(d['sku']),
+        "metafields": build_metafields(d),
         "seo": {
             "title": generate_seo_title(d['title'], d['sku']),
             "description": generate_seo_description(d['title'], d['sku']),
@@ -719,7 +746,7 @@ def build_update_input(product: Dict) -> Dict:
         "vendor": d['vendor'],
         "tags": product.get('_final_tags', sorted(set(d['managed_tags']))),
         "status": d['status'],
-        "metafields": build_metafields(d['sku']),
+        "metafields": build_metafields(d),
     }
     # Only write a description when the existing one is thin — never
     # clobber enriched content.
