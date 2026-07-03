@@ -44,9 +44,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from categorizer_v4 import ProductCategorizer
 from product_content import (
-    ai_available, build_description, compute_vendor,
-    extract_brand, extract_compatible_models, extract_dimensions,
-    extract_material, extract_pack_quantity,
+    adapt_metafields_to_definitions, ai_available, build_description,
+    compute_vendor, extract_brand, extract_compatible_models,
+    extract_dimensions, extract_material, extract_pack_quantity,
     generate_descriptions_ai, generate_seo_description, generate_seo_title,
     strip_html, taxonomy_for_handle,
 )
@@ -194,6 +194,28 @@ def normalize_price(price_str: str) -> str:
     except (ValueError, TypeError):
         return "0.00"
 
+_metafield_def_types: Optional[Dict[str, str]] = None
+
+def get_metafield_definition_types() -> Dict[str, str]:
+    """key -> type name for the store's pinned custom.* product metafield
+    definitions. Writes must match these types or Shopify rejects them."""
+    global _metafield_def_types
+    if _metafield_def_types is None:
+        query = """
+        query {
+          metafieldDefinitions(first: 100, ownerType: PRODUCT, namespace: "custom") {
+            nodes { key type { name } }
+          }
+        }
+        """
+        result = graphql_request(query)
+        nodes = (result.get('data', {})
+                       .get('metafieldDefinitions', {}) or {}).get('nodes', []) or []
+        _metafield_def_types = {n['key']: n['type']['name'] for n in nodes}
+        if _metafield_def_types:
+            log(f"Store metafield definitions (custom.*): {_metafield_def_types}")
+    return _metafield_def_types
+
 def build_metafields(desired: Dict) -> List[Dict]:
     """Structured metadata extracted from the title/type, namespace `custom`.
     custom.mpn = JohnnyVac SKU. Google accepts Brand + MPN instead of GTIN."""
@@ -218,7 +240,7 @@ def build_metafields(desired: Dict) -> List[Dict]:
     specs = extract_dimensions(title)
     add('size_inches', specs.get('size_inches'))
     add('voltage', specs.get('voltage'))
-    return metafields
+    return adapt_metafields_to_definitions(metafields, get_metafield_definition_types())
 
 def merge_tags(existing_tags: List[str], managed_tags: List[str], known_handles: Set[str]) -> List[str]:
     """Replace only the tags this sync owns; preserve everything added manually."""
