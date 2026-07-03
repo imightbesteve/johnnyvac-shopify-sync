@@ -105,14 +105,17 @@ jobs:
           path: skipped_products.csv
           if-no-files-found: ignore
 
-      - name: Create/update automated collections (optional)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.create_collections == 'true'
+      # Collections stay in step with the catalog: every scheduled run
+      # creates/updates category + brand collections (idempotent), and manual
+      # runs can opt in via the create_collections input.
+      - name: Create/update automated collections
+        if: github.event_name == 'schedule' || github.event.inputs.create_collections == 'true'
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
           SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-          AUTO_PUBLISH: ${{ github.event.inputs.auto_publish }}
+          AUTO_PUBLISH: ${{ github.event.inputs.auto_publish || 'true' }}
         run: |
           echo "Creating / updating Shopify automated collections..."
           python create_collections.py
@@ -129,11 +132,16 @@ jobs:
             echo ""
             echo "### Results"
             echo "- 🧹 Product sync: Completed"
-            if [[ "${{ github.event.inputs.create_collections }}" == "true" ]]; then
+            if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event.inputs.create_collections }}" == "true" ]]; then
               echo "- 🗂️ Collections: Created / Updated"
-              echo "- 🚀 Auto publish: ${{ github.event.inputs.auto_publish }}"
+              echo "- 🚀 Auto publish: ${{ github.event.inputs.auto_publish || 'true' }}"
             else
               echo "- 🗂️ Collections: Skipped"
+            fi
+            if [[ "${{ secrets.ANTHROPIC_API_KEY }}" == "" ]]; then
+              echo "- 🧠 AI descriptions: ⚠️ DISABLED — add the ANTHROPIC_API_KEY repo secret to enable Claude-written descriptions (template fallback in use)"
+            else
+              echo "- 🧠 AI descriptions: enabled"
             fi
             echo ""
             echo "### Reports"

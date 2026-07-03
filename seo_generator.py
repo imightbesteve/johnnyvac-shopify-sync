@@ -28,9 +28,12 @@ import requests
 from datetime import datetime
 
 from product_content import generate_seo_title, generate_seo_description
+from shopify_auth import get_access_token
 
 SHOPIFY_STORE = os.environ.get('SHOPIFY_STORE', 'kingsway-janitorial.myshopify.com')
-SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
+# Prefer client_credentials (fresh token w/ current scopes); falls back to a
+# static SHOPIFY_ACCESS_TOKEN. See shopify_auth.py.
+SHOPIFY_ACCESS_TOKEN = get_access_token() or ''
 API_VERSION = '2026-01'
 RATE_LIMIT_DELAY = 0.5
 REQUEST_TIMEOUT = 30
@@ -209,10 +212,10 @@ class SEOGenerator:
 
 def main():
     store = os.environ.get("SHOPIFY_STORE", SHOPIFY_STORE)
-    token = os.environ.get("SHOPIFY_ACCESS_TOKEN", SHOPIFY_ACCESS_TOKEN)
+    token = SHOPIFY_ACCESS_TOKEN
 
     if not token:
-        print("❌ Error: SHOPIFY_ACCESS_TOKEN not set")
+        print("❌ Error: no Shopify credentials (set SHOPIFY_CLIENT_ID/SECRET or SHOPIFY_ACCESS_TOKEN)")
         return
 
     parser = argparse.ArgumentParser(description="Generate SEO metadata for Shopify products")

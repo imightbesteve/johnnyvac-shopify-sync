@@ -1,4 +1,4 @@
-name: Backfill MPN Metafield
+name: Backfill Product Metafields
 
 on:
   workflow_dispatch:
@@ -11,11 +11,16 @@ on:
         options:
           - 'dry-run'
           - 'live'
+      limit:
+        description: 'Limit products (leave empty for all)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
-  backfill-mpn:
+  backfill-metafields:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repository
@@ -29,27 +34,32 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run MPN Backfill
+      - name: Run Metafields Backfill
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
           SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
         run: |
+          ARGS=""
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="--limit ${{ inputs.limit }}"
+          fi
           if [ "${{ inputs.mode }}" == "live" ]; then
             echo "⚡ Running in LIVE mode"
-            python backfill_mpn.py --live
+            python backfill_metafields.py --live $ARGS
           else
             echo "🔍 Running in DRY RUN mode"
-            python backfill_mpn.py --dry-run
+            python backfill_metafields.py --dry-run $ARGS
           fi
 
       - name: Job summary
         if: always()
         run: |
           {
-            echo "## MPN Metafield Backfill"
+            echo "## Product Metafields Backfill"
             echo ""
             echo "- Mode: ${{ inputs.mode }}"
+            echo "- Limit: ${{ inputs.limit || 'all products' }}"
             echo "- ⏰ $(date -u)"
           } >> $GITHUB_STEP_SUMMARY
