@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Dict, List
 
 from product_content import (
+    adapt_metafields_to_definitions,
     extract_brand, extract_compatible_models, extract_dimensions,
     extract_material, extract_pack_quantity,
 )
@@ -109,6 +110,25 @@ def desired_metafields(product_id: str, title: str, product_type: str, sku: str)
     add('size_inches', specs.get('size_inches'))
     add('voltage', specs.get('voltage'))
     return fields
+
+
+def fetch_definition_types() -> Dict[str, str]:
+    """key -> type for the store's pinned custom.* product metafield
+    definitions; writes that don't match get rejected batch-wide."""
+    query = """
+    query {
+      metafieldDefinitions(first: 100, ownerType: PRODUCT, namespace: "custom") {
+        nodes { key type { name } }
+      }
+    }
+    """
+    result = graphql(query)
+    nodes = (result.get('data', {})
+                   .get('metafieldDefinitions', {}) or {}).get('nodes', []) or []
+    types = {n['key']: n['type']['name'] for n in nodes}
+    if types:
+        log(f"Store metafield definitions (custom.*): {types}")
+    return types
 
 
 def fetch_all_products() -> List[Dict]:
@@ -206,6 +226,8 @@ def main():
         log("No Shopify credentials (set SHOPIFY_CLIENT_ID/SECRET or SHOPIFY_ACCESS_TOKEN)", 'ERROR')
         sys.exit(1)
 
+    def_types = fetch_definition_types()
+
     products = fetch_all_products()
     if args.limit:
         products = products[:args.limit]
@@ -216,7 +238,10 @@ def main():
     up_to_date = 0
 
     for p in products:
-        wanted = desired_metafields(p['id'], p['title'], p['product_type'], p['sku'])
+        wanted = adapt_metafields_to_definitions(
+            desired_metafields(p['id'], p['title'], p['product_type'], p['sku']),
+            def_types
+        )
         missing = [
             m for m in wanted
             if p['existing'].get(m['key'], None) != m['value']

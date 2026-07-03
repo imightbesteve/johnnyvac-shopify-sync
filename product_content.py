@@ -1134,5 +1134,35 @@ TAXONOMY_BY_HANDLE = {
 }
 
 
+def adapt_metafields_to_definitions(metafields: List[Dict],
+                                    definition_types: Dict[str, str]) -> List[Dict]:
+    """Align metafield writes with the store's existing metafield definitions.
+
+    metafieldsSet rejects any write whose type conflicts with the key's
+    pinned definition — and one rejected entry fails its entire batch (this
+    is what made the first metafields backfill write only 4,200 of 15,507).
+    When the definition is the list variant of our scalar type, convert the
+    value to a JSON array; any other conflict is dropped rather than
+    poisoning the batch it ships in.
+    """
+    adapted = []
+    for m in metafields:
+        def_type = definition_types.get(m.get('key'))
+        if not def_type or def_type == m.get('type'):
+            adapted.append(m)
+        elif def_type == f"list.{m.get('type')}":
+            items = [s.strip() for s in str(m.get('value', '')).split(',') if s.strip()]
+            adapted.append({**m, 'type': def_type,
+                            'value': json.dumps(items, separators=(',', ':'))})
+        else:
+            if m.get('key') not in _incompatible_defs_warned:
+                _incompatible_defs_warned.add(m.get('key'))
+                _log(f"Skipping metafield {m.get('key')}: definition type {def_type} "
+                     f"is incompatible with {m.get('type')}", 'WARNING')
+    return adapted
+
+_incompatible_defs_warned: set = set()
+
+
 def taxonomy_for_handle(handle: str) -> Optional[str]:
     return TAXONOMY_BY_HANDLE.get(handle)
