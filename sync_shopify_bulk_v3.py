@@ -115,22 +115,20 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def throttle(self):
-        with self._lock:
-            now = time.time()
-            self.requests = [t for t in self.requests if now - t < 1.0]
-
-            if len(self.requests) >= self.requests_per_second:
-                oldest = min(self.requests)
-                wait_time = 1.0 - (now - oldest) + 0.05
-                if wait_time > 0:
-                    self._lock.release()
-                    try:
-                        time.sleep(wait_time)
-                    finally:
-                        self._lock.acquire()
-                    return self.throttle()
-
-            self.requests.append(time.time())
+        # Loop instead of recursing: the old version re-acquired the
+        # non-reentrant lock it already held before recursing, deadlocking
+        # the whole sync the first time two requests landed in the same
+        # second (this is what silently hung the 2026-07-04 archive pass
+        # for 3 hours until the job timeout).
+        while True:
+            with self._lock:
+                now = time.time()
+                self.requests = [t for t in self.requests if now - t < 1.0]
+                if len(self.requests) < self.requests_per_second:
+                    self.requests.append(now)
+                    return
+                wait_time = 1.0 - (now - min(self.requests)) + 0.05
+            time.sleep(max(wait_time, 0.01))
 
 rate_limiter = RateLimiter(RATE_LIMIT_PER_SECOND)
 
@@ -1288,10 +1286,12 @@ def archive_missing_products(missing_skus: List[str], existing_products: Dict[st
     log(f"\nArchiving {len(missing_skus)} missing products (with 301 redirects)...")
 
     archived = 0
-    for sku in missing_skus:
+    for i, sku in enumerate(missing_skus, 1):
         existing = existing_products.get(sku)
         if existing and archive_product(sku, existing, known_handles):
             archived += 1
+        if i % 100 == 0:
+            log(f"  Archive progress: {i}/{len(missing_skus)} ({archived} archived)")
 
     log(f"✓ Archived {archived} products")
     return archived
