@@ -518,6 +518,11 @@ def sync_collections(specs: List[Dict]) -> Dict[str, int]:
             else:
                 log(f"   ✅ Already exists ({count} products)")
                 stats['skipped_exists'] += 1
+            # Re-attempt publishing (idempotent): collections created while the
+            # token lacked write_publications stay unpublished; this picks them
+            # up on the first run after the scope is granted.
+            if AUTO_PUBLISH:
+                publish_collection(existing['id'])
             time.sleep(RATE_LIMIT_DELAY)
             continue
 
