@@ -418,20 +418,30 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
 
     result = graphql_request(mutation, use_rate_limit=False)
 
-    errors = result.get('data', {}).get('bulkOperationRunQuery', {}).get('userErrors', [])
+    payload = result.get('data', {}).get('bulkOperationRunQuery', {}) or {}
+    errors = payload.get('userErrors', [])
     if errors:
         log(f"Bulk query errors: {errors}", 'ERROR')
         raise Exception(f"Bulk query failed: {errors}")
 
-    return poll_and_download_bulk_results()
+    operation_id = (payload.get('bulkOperation') or {}).get('id')
+    if not operation_id:
+        raise Exception("Bulk query returned no operation id")
 
-def poll_and_download_bulk_results() -> Dict[str, Dict]:
-    """Poll bulk operation and download results"""
+    return poll_and_download_bulk_results(operation_id)
+
+def poll_and_download_bulk_results(operation_id: Optional[str] = None) -> Dict[str, Dict]:
+    """Poll bulk operation and download results.
+
+    Raises rather than returning an empty catalog. An empty `existing_products`
+    makes every SKU in the feed look new, which is how the store accumulated
+    11,008 duplicate products across Nov-Dec 2025.
+    """
     log("Polling for bulk query completion...")
 
     query = """
     query {
-      currentBulkOperation {
+      currentBulkOperation(type: QUERY) {
         id
         status
         errorCode
@@ -451,15 +461,28 @@ def poll_and_download_bulk_results() -> Dict[str, Dict]:
             time.sleep(POLL_INTERVAL)
             continue
 
+        # currentBulkOperation returns the most recent QUERY operation, which is
+        # not necessarily the one just started. Waiting for ours avoids reading a
+        # previous run's result - whose URL may have expired, yielding no URL at all.
+        if operation_id and operation.get('id') != operation_id:
+            log(f"  Waiting for {operation_id}, saw {operation.get('id')}")
+            time.sleep(POLL_INTERVAL)
+            continue
+
         status = operation.get('status')
         count = operation.get('objectCount', 0)
         log(f"  Bulk operation status: {status}, objects: {count}")
 
         if status == 'COMPLETED':
             url = operation.get('url')
-            if url:
-                return download_bulk_results(url)
-            return {}
+            if not url:
+                # Previously returned {} here, which the caller could not
+                # distinguish from a genuinely empty store.
+                raise Exception(
+                    f"Bulk operation COMPLETED with no result URL (objectCount={count}); "
+                    "refusing to treat the catalog as empty"
+                )
+            return download_bulk_results(url)
         elif status in ['FAILED', 'CANCELED']:
             raise Exception(f"Bulk operation failed: {operation.get('errorCode')}")
 
@@ -513,6 +536,59 @@ def download_bulk_results(url: str) -> Dict[str, Dict]:
 
     log(f"✓ Parsed {len(products)} existing products from Shopify")
     return products
+
+# Loose on purpose: duplicate SKUs collapse in the lookup, so the SKU count sits
+# legitimately below the product count until the catalog cleanup completes.
+MIN_EXISTING_RATIO = 0.5
+
+
+def get_product_count() -> int:
+    """Cheap authoritative product count, used to sanity-check the bulk fetch."""
+    query = """
+    query {
+      productsCount {
+        count
+      }
+    }
+    """
+    result = graphql_request(query, use_rate_limit=False)
+    return int(((result.get('data') or {}).get('productsCount') or {}).get('count') or 0)
+
+
+def verify_existing_products(existing_products: Dict[str, Dict], reported_count: int) -> None:
+    """Abort before the delta if the fetched catalog looks implausibly small.
+
+    A catalog that appears to have vanished is a fetch failure, never a reason to
+    recreate every product in the feed.
+    """
+    fetched = len(existing_products)
+
+    if reported_count <= 0:
+        if fetched == 0:
+            raise Exception(
+                "Existing-product fetch returned nothing and the product count is "
+                "unavailable; refusing to run the delta"
+            )
+        log("Could not read productsCount; skipping catalog size check", 'WARNING')
+        return
+
+    if fetched == 0:
+        raise Exception(
+            f"Existing-product fetch returned 0 SKUs but the store reports "
+            f"{reported_count} products; refusing to run the delta"
+        )
+
+    # productsCount saturates at 10000, so only compare below that ceiling.
+    expected = min(reported_count, 10000)
+    if fetched < expected * MIN_EXISTING_RATIO:
+        raise Exception(
+            f"Existing-product fetch returned only {fetched} SKUs against "
+            f"{reported_count} products in the store; refusing to run the delta. "
+            "Creating from an incomplete catalog is what produced the Nov-Dec 2025 duplicates."
+        )
+
+    log(f"  Catalog check OK: {fetched} SKUs against {reported_count} products")
+
 
 def get_existing_products_paginated() -> Dict[str, Dict]:
     """Fallback: fetch products with pagination if bulk fails"""
@@ -1345,6 +1421,13 @@ def main():
     # Step 4: Fetch existing products (using bulk query - fast!)
     log("\n[4/8] Fetching existing Shopify products...")
     fetch_start = time.time()
+
+    reported_count = 0
+    try:
+        reported_count = get_product_count()
+    except Exception as e:
+        log(f"Could not read productsCount ({e})", 'WARNING')
+
     try:
         existing_products = get_existing_products_bulk()
     except Exception as e:
@@ -1352,6 +1435,8 @@ def main():
         existing_products = get_existing_products_paginated()
     fetch_time = time.time() - fetch_start
     log(f"  Fetch completed in {fetch_time:.1f}s")
+
+    verify_existing_products(existing_products, reported_count)
 
     # Step 5: Calculate delta
     log("\n[5/8] Calculating delta...")
