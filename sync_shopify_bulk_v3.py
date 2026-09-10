@@ -504,9 +504,42 @@ def _existing_from_product_node(obj: Dict) -> Dict:
         'seo_title': (obj.get('seo') or {}).get('title', '') or '',
     }
 
+# SKUs seen ONLY on archived products. The catalog cleanup archives redundant
+# duplicate copies, and a SKU whose every copy is archived must not be treated
+# as absent from Shopify -- creating it again would rebuild the duplicate this
+# store just spent a cleanup removing.
+ARCHIVED_ONLY_SKUS: Set[str] = set()
+
+
+def _register_existing(products: Dict[str, Dict], sku: str, record: Dict) -> None:
+    """Collapse duplicate SKUs onto a single record.
+
+    Two rules the plain `products[sku] = record` did not have:
+
+    ARCHIVED copies never enter the lookup. They used to, and because the last
+    copy parsed wins and archived duplicates tend to be the newest ids, an
+    archived copy could become *the* record for its SKU -- after which the sync
+    would update it, force it back to ACTIVE, or "archive" it to DRAFT, undoing
+    the cleanup. Excluding them also keeps them out of `missing_skus`.
+
+    Among the copies that remain, ACTIVE beats DRAFT, so the record matches the
+    copy the cleanup keeps rather than whichever happened to be parsed last.
+    """
+    if record.get('status') == 'ARCHIVED':
+        if sku not in products:
+            ARCHIVED_ONLY_SKUS.add(sku)
+        return
+    ARCHIVED_ONLY_SKUS.discard(sku)
+    prev = products.get(sku)
+    if prev is not None and prev.get('status') == 'ACTIVE' and record.get('status') != 'ACTIVE':
+        return
+    products[sku] = record
+
+
 def download_bulk_results(url: str) -> Dict[str, Dict]:
     """Download and parse bulk query results"""
     log("Downloading bulk results...")
+    ARCHIVED_ONLY_SKUS.clear()
 
     response = requests.get(url, timeout=120)
     response.raise_for_status()
@@ -526,13 +559,13 @@ def download_bulk_results(url: str) -> Dict[str, Dict]:
         elif 'sku' in obj:
             sku = obj.get('sku')
             if sku and current_product:
-                products[sku] = {
+                _register_existing(products, sku, {
                     **current_product,
                     'variant_id': obj['id'],
                     'inventory_item_id': (obj.get('inventoryItem') or {}).get('id', ''),
                     'price': obj.get('price', '0'),
                     'inventory': obj.get('inventoryQuantity', 0)
-                }
+                })
 
     log(f"✓ Parsed {len(products)} existing products from Shopify")
     return products
@@ -593,6 +626,7 @@ def verify_existing_products(existing_products: Dict[str, Dict], reported_count:
 def get_existing_products_paginated() -> Dict[str, Dict]:
     """Fallback: fetch products with pagination if bulk fails"""
     log("Using paginated fetch (fallback)...")
+    ARCHIVED_ONLY_SKUS.clear()
     products = {}
     cursor = None
     page = 0
@@ -645,13 +679,13 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                 variant = var_edge['node']
                 sku = variant.get('sku')
                 if sku:
-                    products[sku] = {
+                    _register_existing(products, sku, {
                         **base,
                         'variant_id': variant['id'],
                         'inventory_item_id': (variant.get('inventoryItem') or {}).get('id', ''),
                         'price': variant.get('price', '0'),
                         'inventory': variant.get('inventoryQuantity', 0)
-                    }
+                    })
 
         if page % 20 == 0:
             log(f"  Page {page}, products: {len(products)}")
@@ -678,6 +712,7 @@ def calculate_delta(
     to_update = []
     unchanged = []
     csv_skus = set()
+    skipped_archived = 0
 
     counts = {'core': 0, 'price': 0, 'inventory': 0, 'vendor': 0, 'tags': 0,
               'seo': 0, 'description': 0, 'category': 0}
@@ -689,6 +724,11 @@ def calculate_delta(
         product['_desired'] = desired
 
         if sku not in existing_products:
+            if sku in ARCHIVED_ONLY_SKUS:
+                # every copy of this SKU is archived: the cleanup retired it
+                # deliberately. Recreating it would rebuild the duplicate.
+                skipped_archived += 1
+                continue
             to_create.append(product)
             continue
 
@@ -731,6 +771,8 @@ def calculate_delta(
             log(f"    - {k} changes: {v}")
     log(f"  UNCHANGED: {len(unchanged)} (skipping)")
     log(f"  MISSING (will archive): {len(missing_skus)}")
+    if skipped_archived:
+        log(f"  SKIPPED (archived duplicates, not recreated): {skipped_archived}")
 
     return to_create, to_update, unchanged, missing_skus
 
@@ -1333,7 +1375,10 @@ def check_redirect_scope() -> bool:
 def archive_product(sku: str, existing: Dict, known_handles: Set[str]) -> bool:
     """Archive a product (set to DRAFT) and 301-redirect its URL to the
     matching collection so Google doesn't accumulate 404s."""
-    if existing.get('status') == 'DRAFT':
+    if existing.get('status') in ('DRAFT', 'ARCHIVED'):
+        # ARCHIVED matters as much as DRAFT here: this function "archives" by
+        # setting DRAFT, so without the ARCHIVED case it would take a properly
+        # archived product and *un*-archive it back to DRAFT.
         return True  # Already archived
 
     if DRY_RUN:
