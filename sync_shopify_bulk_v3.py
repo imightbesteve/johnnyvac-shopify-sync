@@ -287,6 +287,18 @@ def build_desired_state(product: Dict) -> Dict:
 # CSV FETCHING
 # =============================================================================
 
+def _skipped_jv_categories() -> Set[str]:
+    """JohnnyVac categories the categorizer drops wholesale (Clearance,
+    Promotional). Read from the same rules file the categorizer uses so the
+    two can't drift apart."""
+    try:
+        with open('category_map_v4.json', 'r', encoding='utf-8') as f:
+            settings = json.load(f).get('settings', {})
+        return set(settings.get('skip_patterns', {}).get('skip_jv_categories', []))
+    except (OSError, ValueError):
+        return set()
+
+
 def fetch_csv_data() -> Tuple[List[Dict], List[str]]:
     log(f"Fetching CSV from: {CSV_URL}")
 
@@ -296,20 +308,31 @@ def fetch_csv_data() -> Tuple[List[Dict], List[str]]:
 
     reader = csv.DictReader(lines, delimiter=';')
 
-    products = []
-    seen_skus: Set[str] = set()
+    skipped_categories = _skipped_jv_categories()
+    by_sku: Dict[str, Dict] = {}
     duplicate_skus: List[str] = []
 
     for row in reader:
         sku = (row.get('SKU') or '').strip()
         if not sku:
             continue
-        if sku in seen_skus:
-            duplicate_skus.append(sku)
-            continue
-        seen_skus.add(sku)
         cleaned_row = {k: (v.strip() if v else '') for k, v in row.items()}
-        products.append(cleaned_row)
+        prev = by_sku.get(sku)
+        if prev is None:
+            by_sku[sku] = cleaned_row
+            continue
+        duplicate_skus.append(sku)
+        # The feed lists some SKUs twice: once under a real category and once
+        # under Clearance/Promotional. Those are real products that happen to
+        # be on clearance, but first-row-wins kept whichever came first, and
+        # when that was the clearance row the categorizer skipped the SKU,
+        # calculate_delta counted it missing, and archive_missing_products
+        # drafted the live product. Prefer the row the categorizer will keep.
+        if (prev.get('ProductCategory') in skipped_categories
+                and cleaned_row.get('ProductCategory') not in skipped_categories):
+            by_sku[sku] = cleaned_row
+
+    products = list(by_sku.values())
 
     log(f"✓ Parsed {len(products)} products from CSV")
     if duplicate_skus:
