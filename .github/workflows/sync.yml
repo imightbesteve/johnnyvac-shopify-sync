@@ -28,6 +28,16 @@ on:
         required: false
         type: boolean
         default: true
+      archive_cap:
+        description: 'Most live products one run may draft; over this the run drafts nothing and fails'
+        required: false
+        type: number
+        default: 50
+
+# A manual run queues behind the scheduled one instead of racing it.
+concurrency:
+  group: shopify-sync
+  cancel-in-progress: false
 
 jobs:
   sync-products:
@@ -73,6 +83,7 @@ jobs:
           EOF
 
       - name: Sync products to Shopify
+        id: sync
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
@@ -82,6 +93,7 @@ jobs:
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-8' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           ARCHIVE_MISSING: ${{ github.event.inputs.archive_missing || 'true' }}
+          MAX_ARCHIVE_PER_RUN: ${{ github.event.inputs.archive_cap || '50' }}
         run: |
           echo "Starting JohnnyVac product sync..."
           if [ "$DRY_RUN" = "true" ]; then
@@ -128,10 +140,10 @@ jobs:
             echo ""
             echo "### Run Configuration"
             echo "- 🔄 Dry run: ${{ github.event.inputs.dry_run || 'false' }}"
-            echo "- 🗑️ Archive missing: ${{ github.event.inputs.archive_missing || 'true' }}"
+            echo "- 🗑️ Archive missing: ${{ github.event.inputs.archive_missing || 'true' }} (cap ${{ github.event.inputs.archive_cap || '50' }} per run)"
             echo ""
             echo "### Results"
-            echo "- 🧹 Product sync: Completed"
+            echo "- 🧹 Product sync: ${{ steps.sync.outcome }} (details above)"
             if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event.inputs.create_collections }}" == "true" ]]; then
               echo "- 🗂️ Collections: Created / Updated"
               echo "- 🚀 Auto publish: ${{ github.event.inputs.auto_publish || 'true' }}"

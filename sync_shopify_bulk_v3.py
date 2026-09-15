@@ -66,6 +66,10 @@ IMAGE_BASE_URL = 'https://www.johnnyvacstock.com/photos/web/'
 LANGUAGE = 'en'
 DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 ARCHIVE_MISSING = os.environ.get('ARCHIVE_MISSING', 'true').lower() == 'true'
+# Most live products one run may draft. A feed that comes back short makes
+# every absent SKU look delisted; past this many the run drafts nothing and
+# fails instead, so the failure email is the alert.
+MAX_ARCHIVE_PER_RUN = int(os.environ.get('MAX_ARCHIVE_PER_RUN', '50'))
 
 # Out-of-stock products stay ACTIVE and show as "Sold out" instead of being
 # unpublished to DRAFT (which 404s the URL and churns Google's index every
@@ -793,7 +797,7 @@ def calculate_delta(
         if v:
             log(f"    - {k} changes: {v}")
     log(f"  UNCHANGED: {len(unchanged)} (skipping)")
-    log(f"  MISSING (will archive): {len(missing_skus)}")
+    log(f"  MISSING from feed: {len(missing_skus)}")
     if skipped_archived:
         log(f"  SKIPPED (archived duplicates, not recreated): {skipped_archived}")
 
@@ -1422,23 +1426,85 @@ def archive_product(sku: str, existing: Dict, known_handles: Set[str]) -> bool:
 
 
 def archive_missing_products(missing_skus: List[str], existing_products: Dict[str, Dict],
-                             known_handles: Set[str]) -> int:
-    """Archive products no longer in CSV"""
+                             known_handles: Set[str]) -> Dict:
+    """Draft the live products whose SKU has left the feed.
+
+    Most "missing" SKUs were drafted on an earlier run and simply stay absent,
+    so only the ones still ACTIVE count. Past MAX_ARCHIVE_PER_RUN of those the
+    pass drafts nothing: a feed that came back short looks exactly like a mass
+    delisting, and main() fails the run so someone looks.
+    """
+    result = {'live': [], 'drafted': [], 'refused': False}
     if not missing_skus or not ARCHIVE_MISSING:
-        return 0
+        return result
 
-    log(f"\nArchiving {len(missing_skus)} missing products (with 301 redirects)...")
+    result['live'] = [dict(existing_products[sku], sku=sku) for sku in missing_skus
+                      if existing_products[sku].get('status') == 'ACTIVE']
+    already = len(missing_skus) - len(result['live'])
+    log(f"\n{len(missing_skus)} SKUs absent from feed: {already} already drafted, "
+        f"{len(result['live'])} still live")
 
-    archived = 0
-    for i, sku in enumerate(missing_skus, 1):
-        existing = existing_products.get(sku)
-        if existing and archive_product(sku, existing, known_handles):
-            archived += 1
-        if i % 100 == 0:
-            log(f"  Archive progress: {i}/{len(missing_skus)} ({archived} archived)")
+    if len(result['live']) > MAX_ARCHIVE_PER_RUN:
+        result['refused'] = True
+        log(f"Refusing to draft {len(result['live'])} live products in one run "
+            f"(cap {MAX_ARCHIVE_PER_RUN}); nothing archived", 'ERROR')
+        return result
 
-    log(f"✓ Archived {archived} products")
-    return archived
+    for existing in result['live']:
+        if archive_product(existing['sku'], existing, known_handles):
+            result['drafted'].append(existing)
+    if result['live']:
+        log(f"✓ Drafted {len(result['drafted'])} products (with 301 redirects)")
+    return result
+
+
+def write_job_summary(stats: Dict, archive: Dict, skipped_products: List[Dict]) -> None:
+    """Append the run's results to the GitHub job summary, when there is one.
+
+    A scheduled run reports nowhere else, and the workflow's own summary line
+    used to be a hard-coded "Completed".
+    """
+    path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if not path:
+        return
+
+    def cell(text: str) -> str:
+        return str(text).replace('|', '\\|').replace('\n', ' ')
+
+    lines = [
+        "### Product sync" + (" (dry run)" if DRY_RUN else ""),
+        "",
+        "| Created | Updated | Inventory | Unchanged | Drafted | Feed rows skipped |",
+        "|---|---|---|---|---|---|",
+        f"| {stats['created']} | {stats['updated']} | {stats['inventoried']} | "
+        f"{stats['unchanged']} | {len(archive['drafted'])} | {len(skipped_products)} |",
+        "",
+    ]
+
+    if archive['refused']:
+        lines += [
+            "### ⛔ Archive pass refused",
+            f"{len(archive['live'])} live products are absent from today's feed, over the "
+            f"cap of {MAX_ARCHIVE_PER_RUN}. Nothing was drafted. If the feed is intact and "
+            "this is a real delisting, re-run the workflow with a higher `archive_cap`.",
+            "",
+        ]
+
+    rows = archive['live'] if archive['refused'] else archive['drafted']
+    if rows:
+        verb = "Would draft" if (archive['refused'] or DRY_RUN) else "Drafted"
+        skip_reason = {p.get('SKU'): p.get('skip_reason') for p in skipped_products}
+        lines += [f"### {verb}: left the feed", "", "| SKU | Title | Why |", "|---|---|---|"]
+        for p in rows[:200]:
+            why = skip_reason.get(p['sku'])
+            why = f"skipped by rule: {why}" if why else "no longer in JohnnyVac feed"
+            lines.append(f"| {cell(p['sku'])} | {cell(p['title'])} | {cell(why)} |")
+        if len(rows) > 200:
+            lines.append(f"| … | {len(rows) - 200} more | |")
+        lines.append("")
+
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write("\n".join(lines) + "\n")
 
 # =============================================================================
 # MAIN
@@ -1568,7 +1634,7 @@ def main():
 
     # Step 8: Archive missing
     log("\n[8/8] Archiving missing products...")
-    archived = archive_missing_products(missing_skus, existing_products, known_handles)
+    archive = archive_missing_products(missing_skus, existing_products, known_handles)
 
     # Summary
     total_time = time.time() - start_time
@@ -1582,7 +1648,7 @@ def main():
     log(f"  ✏️  Updated: {updated}")
     log(f"  📦 Inventory synced: {inventoried}")
     log(f"  ⏭️  Unchanged: {len(unchanged)} (skipping)")
-    log(f"  🗑️  Archived: {archived} (with 301 redirects)")
+    log(f"  🗑️  Drafted: {len(archive['drafted'])} (left the feed; with 301 redirects)")
     log(f"  ⛔ Skipped: {len(skipped_products)}")
     log(f"\nPerformance:")
     log(f"  Fetch existing: {fetch_time:.1f}s (bulk query)")
@@ -1590,6 +1656,16 @@ def main():
 
     if DRY_RUN:
         log("\n🔸 DRY RUN - No actual changes were made")
+
+    write_job_summary(
+        {'created': created, 'updated': updated, 'inventoried': inventoried,
+         'unchanged': len(unchanged)},
+        archive, skipped_products,
+    )
+    if archive['refused']:
+        # Everything above already happened; only the archive pass was held
+        # back. Fail anyway so the scheduled run turns red and emails.
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':
