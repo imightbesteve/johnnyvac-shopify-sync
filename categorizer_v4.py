@@ -74,14 +74,19 @@ class ProductCategorizer:
         except (ValueError, TypeError):
             pass
         
+        # Whole words only: 'démo' as a substring skipped every Démousseur
+        # (defoamer) in the feed, and the sync then drafted them as missing.
+        def has_phrase(pattern: str) -> bool:
+            return re.search(r'\b' + re.escape(pattern.lower()) + r'\b', combined_title) is not None
+
         # Check English skip patterns
         for pattern in self.skip_patterns.get('title_patterns_en', []):
-            if pattern.lower() in combined_title:
+            if has_phrase(pattern):
                 return True, f"Matched skip pattern: '{pattern}'"
         
         # Check French skip patterns
         for pattern in self.skip_patterns.get('title_patterns_fr', []):
-            if pattern.lower() in combined_title:
+            if has_phrase(pattern):
                 return True, f"Matched skip pattern (FR): '{pattern}'"
         
         return False, None
