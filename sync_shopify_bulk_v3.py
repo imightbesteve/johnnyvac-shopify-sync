@@ -308,7 +308,10 @@ def fetch_csv_data() -> Tuple[List[Dict], List[str]]:
 
     response = requests.get(CSV_URL, timeout=60)
     response.raise_for_status()
-    lines = response.text.splitlines()
+    # The server sends text/csv with no charset, so response.text would
+    # decode the UTF-8 body as Latin-1 and every ½, ®, é would arrive as
+    # Â½, Â®, Ã© -- and be written to the store that way.
+    lines = response.content.decode('utf-8-sig').splitlines()
 
     reader = csv.DictReader(lines, delimiter=';')
 
