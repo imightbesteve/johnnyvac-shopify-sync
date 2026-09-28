@@ -38,6 +38,7 @@ import json
 import time
 import requests
 import threading
+import uuid
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1042,9 +1043,11 @@ def update_product(product_data: Dict) -> bool:
 # INVENTORY SYNC — inventorySetQuantities, batched
 # =============================================================================
 
+# changeFromQuantity + @idempotent replace compareQuantity/ignoreCompareQuantity,
+# which 2026-01 deprecates and 2026-04 removes (the key becomes required there).
 INVENTORY_SET_MUTATION = """
-mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
-    inventorySetQuantities(input: $input) {
+mutation inventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
         inventoryAdjustmentGroup {
             createdAt
         }
@@ -1078,30 +1081,48 @@ def sync_inventory_quantities(products: List[Dict]) -> int:
         log(f"[DRY RUN] Would set inventory on {len(changed)} products")
         return len(changed)
 
-    updated = 0
-    CHUNK = 250
-    for start in range(0, len(changed), CHUNK):
-        chunk = changed[start:start + CHUNK]
+    def set_quantities(chunk: List[Dict]) -> List[Dict]:
+        """One inventorySetQuantities call; returns its userErrors."""
         quantities = [{
             "inventoryItemId": p['_existing']['inventory_item_id'],
             "locationId": location_id,
             "quantity": p['_desired']['inventory'],
+            # Compare-and-swap against the quantity this run read. If an
+            # order moved the stock since, Shopify refuses the write instead
+            # of overwriting it, and the next run retries from a fresh read.
+            # None (an untracked item has no quantity) opts out of the check.
+            "changeFromQuantity": p['_existing'].get('inventory'),
         } for p in chunk]
+        result = graphql_request(INVENTORY_SET_MUTATION, {
+            "input": {"name": "available", "reason": "correction", "quantities": quantities},
+            # One key per logical write, so a retried request is not applied twice.
+            "idempotencyKey": str(uuid.uuid4()),
+        })
+        if result.get('errors'):
+            return [{'message': str(result['errors'])[:200]}]
+        return result.get('data', {}).get('inventorySetQuantities', {}).get('userErrors', [])
 
-        result = graphql_request(INVENTORY_SET_MUTATION, {"input": {
-            "name": "available",
-            "reason": "correction",
-            "ignoreCompareQuantity": True,
-            "quantities": quantities,
-        }})
-        errors = result.get('data', {}).get('inventorySetQuantities', {}).get('userErrors', [])
-        if errors:
-            log(f"  Inventory batch errors: {errors[:3]}{'...' if len(errors) > 3 else ''}", 'WARNING')
-        else:
+    updated = stale = 0
+    CHUNK = 250
+    for start in range(0, len(changed), CHUNK):
+        chunk = changed[start:start + CHUNK]
+        if not set_quantities(chunk):
             updated += len(chunk)
+        else:
+            # The call is all-or-nothing, so one moved item would hold back
+            # the other 249. Retry them one at a time.
+            for p in chunk:
+                errs = set_quantities([p])
+                if not errs:
+                    updated += 1
+                else:
+                    stale += 1
+                    if stale <= 5:
+                        log(f"  Inventory not set for {p['_desired']['sku']}: {errs[0].get('message')}", 'WARNING')
         log(f"  Inventory progress: {min(start + CHUNK, len(changed))}/{len(changed)}")
 
-    log(f"✓ Inventory synced for {updated} products")
+    log(f"✓ Inventory synced for {updated} products"
+        + (f"; {stale} left for the next run (stock moved or write refused)" if stale else ""))
     return updated
 
 # =============================================================================
