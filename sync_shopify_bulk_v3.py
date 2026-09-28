@@ -39,12 +39,14 @@ import time
 import requests
 import threading
 import uuid
+from urllib.parse import quote
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from categorizer_v4 import ProductCategorizer
 from title_cleaner import clean_title
+from fitment import build_fitment
 from product_content import (
     adapt_metafields_to_definitions, ai_available, build_description,
     compute_vendor, extract_brand, extract_compatible_models,
@@ -221,6 +223,14 @@ def get_metafield_definition_types() -> Dict[str, str]:
             log(f"Store metafield definitions (custom.*): {_metafield_def_types}")
     return _metafield_def_types
 
+def fitment_models(desired: Dict) -> List[str]:
+    """Machine models a part fits: the feed's fitment links and model numbers
+    in the title (see fitment.py), then the brand-model patterns the title
+    extractor finds (EL5010, AH10165)."""
+    extracted = extract_compatible_models(desired.get('title', ''), desired.get('product_type', ''))
+    return list(dict.fromkeys(desired.get('fits_models', []) + extracted))[:12]
+
+
 def build_metafields(desired: Dict) -> List[Dict]:
     """Structured metadata extracted from the title/type, namespace `custom`.
     custom.mpn = JohnnyVac SKU. Google accepts Brand + MPN instead of GTIN."""
@@ -240,8 +250,11 @@ def build_metafields(desired: Dict) -> List[Dict]:
     add('brand', extract_brand(title))
     add('pack_quantity', extract_pack_quantity(title), 'number_integer')
     add('material', extract_material(title))
-    add('compatible_models',
-        ', '.join(extract_compatible_models(title, desired.get('product_type', ''))))
+    add('compatible_models', ', '.join(fitment_models(desired)))
+    if desired.get('part_gids'):
+        metafields.append({"namespace": "custom", "key": "compatible_parts",
+                           "type": "list.product_reference",
+                           "value": json.dumps(desired['part_gids'], separators=(',', ':'))})
     specs = extract_dimensions(title)
     add('size_inches', specs.get('size_inches'))
     add('voltage', specs.get('voltage'))
@@ -292,6 +305,9 @@ def build_desired_state(product: Dict) -> Dict:
         ],
         'upc': product.get('upc', '') or None,
         'seo_title': generate_seo_title(title, sku),
+        'fits_models': product.get('_fits', []),
+        'part_skus': product.get('_part_skus', []),
+        'seo_description': generate_seo_description(title, sku, jv_desc),
     }
 
 # =============================================================================
@@ -423,6 +439,15 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
                   title
                   description
                 }
+                featuredMedia {
+                  id
+                }
+                compatibleModels: metafield(namespace: "custom", key: "compatible_models") {
+                  value
+                }
+                compatibleParts: metafield(namespace: "custom", key: "compatible_parts") {
+                  value
+                }
                 variants(first: 5) {
                   edges {
                     node {
@@ -541,7 +566,18 @@ def _existing_from_product_node(obj: Dict) -> Dict:
         'category_id': (obj.get('category') or {}).get('id', '') or '',
         'seo_title': (obj.get('seo') or {}).get('title', '') or '',
         'seo_description': (obj.get('seo') or {}).get('description', '') or '',
+        'has_image': bool(obj.get('featuredMedia')),
+        'compatible_models': _json_list((obj.get('compatibleModels') or {}).get('value')),
+        'compatible_parts': _json_list((obj.get('compatibleParts') or {}).get('value')),
     }
+
+
+def _json_list(value: Optional[str]) -> List[str]:
+    try:
+        parsed = json.loads(value) if value else []
+    except ValueError:
+        return [value]
+    return parsed if isinstance(parsed, list) else [str(parsed)]
 
 # SKUs seen ONLY on archived products. The catalog cleanup archives redundant
 # duplicate copies, and a SKU whose every copy is archived must not be treated
@@ -685,6 +721,9 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                     description(truncateAt: 200)
                     category { id }
                     seo { title description }
+                    featuredMedia { id }
+                    compatibleModels: metafield(namespace: "custom", key: "compatible_models") { value }
+                    compatibleParts: metafield(namespace: "custom", key: "compatible_parts") { value }
                     variants(first: 5) {
                         edges {
                             node {
@@ -754,12 +793,14 @@ def calculate_delta(
     skipped_archived = 0
 
     counts = {'core': 0, 'price': 0, 'inventory': 0, 'vendor': 0, 'tags': 0,
-              'seo': 0, 'description': 0, 'category': 0}
+              'seo': 0, 'description': 0, 'category': 0, 'fitment': 0}
 
     for product in csv_products:
         sku = product.get('SKU', '')
         csv_skus.add(sku)
         desired = build_desired_state(product)
+        desired['part_gids'] = [existing_products[s]['product_id'] for s in desired['part_skus']
+                                if (existing_products.get(s) or {}).get('status') == 'ACTIVE']
         product['_desired'] = desired
 
         if sku not in existing_products:
@@ -785,13 +826,18 @@ def calculate_delta(
             'inventory': existing.get('inventory', 0) != desired['inventory'],
             'vendor': existing.get('vendor', '') != desired['vendor'],
             'tags': set(existing.get('tags', [])) != set(final_tags),
-            # The sync owns the SEO title (every stored one was generated);
-            # tag a product seo:manual to keep a hand-written one.
+            # The sync owns SEO title + description (every stored one was
+            # generated); tag a product seo:manual to keep hand-written ones.
             'seo': (not existing.get('seo_title')
-                    or (existing.get('seo_title') != desired['seo_title']
+                    or ((existing.get('seo_title') != desired['seo_title']
+                         or existing.get('seo_description') != desired['seo_description'])
                         and SEO_MANUAL_TAG not in (existing.get('tags') or []))),
             'description': len(existing.get('description_text', '')) < MIN_DESCRIPTION_LENGTH,
             'category': bool(desired['category_gid']) and existing.get('category_id', '') != desired['category_gid'],
+            # Only a non-empty list is written, so only a non-empty one is
+            # compared -- an emptied list would otherwise re-flag every day.
+            'fitment': (bool(fitment_models(desired)) and existing.get('compatible_models') != fitment_models(desired))
+                       or (bool(desired['part_gids']) and existing.get('compatible_parts') != desired['part_gids']),
         }
 
         if any(flags.values()):
@@ -897,7 +943,7 @@ def build_create_input(product: Dict, location_id: Optional[str]) -> Dict:
         "metafields": build_metafields(d),
         "seo": {
             "title": d['seo_title'],
-            "description": generate_seo_description(d['title'], d['sku']),
+            "description": d['seo_description'],
         },
         "productOptions": [
             {"name": "Title", "values": [{"name": "Default Title"}]}
@@ -934,13 +980,8 @@ def build_update_input(product: Dict) -> Dict:
     # clobber enriched content.
     if flags.get('description'):
         update_input["descriptionHtml"] = description_for(product)
-    # SEO title follows the product title; the description is only filled
-    # when empty, so rewriting titles does not touch it.
     if flags.get('seo'):
-        update_input["seo"] = {
-            "title": d['seo_title'],
-            "description": existing.get('seo_description') or generate_seo_description(d['title'], d['sku']),
-        }
+        update_input["seo"] = {"title": d['seo_title'], "description": d['seo_description']}
     if flags.get('category') and d['category_gid']:
         update_input["category"] = d['category_gid']
     return update_input
@@ -1535,6 +1576,63 @@ def archive_missing_products(missing_skus: List[str], existing_products: Dict[st
     return result
 
 
+PRODUCT_MEDIA_MUTATION = """
+mutation productUpdate($product: ProductUpdateInput!, $media: [CreateMediaInput!]) {
+    productUpdate(product: $product, media: $media) {
+        product { id }
+        userErrors { field message }
+    }
+}
+"""
+
+
+def supplier_photo_url(sku: str) -> str:
+    return f"{IMAGE_BASE_URL}{quote(sku)}.jpg"
+
+
+def attach_missing_photos(products: List[Dict], existing_products: Dict[str, Dict]) -> Tuple[int, int]:
+    """Give live products without a photo the supplier's, once it exists.
+
+    The photo is attached when a product is created, and the supplier often
+    publishes it later -- 129 products were found waiting on 2026-09-28. So
+    every run checks the image-less ones (a HEAD request each, in parallel)
+    and attaches whatever has appeared. Returns (without a photo, attached)."""
+    bare = [p for p in products
+            if (existing_products.get(p['_desired']['sku']) or {}).get('status') == 'ACTIVE'
+            and not existing_products[p['_desired']['sku']].get('has_image')]
+    if not bare:
+        return 0, 0
+
+    def available(p: Dict) -> bool:
+        try:
+            r = requests.head(supplier_photo_url(p['_desired']['sku']), timeout=15, allow_redirects=True)
+            return r.status_code == 200 and r.headers.get('Content-Type', '').startswith('image/')
+        except requests.exceptions.RequestException:
+            return False
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        found = [p for p, ok in zip(bare, pool.map(available, bare)) if ok]
+    log(f"\nPhotos: {len(bare)} live products have none; the supplier now has {len(found)}")
+    if DRY_RUN or not found:
+        return len(bare), len(found) if DRY_RUN else 0
+
+    attached = 0
+    for p in found:
+        d = p['_desired']
+        result = graphql_request(PRODUCT_MEDIA_MUTATION, {
+            'product': {'id': existing_products[d['sku']]['product_id']},
+            'media': [{'originalSource': supplier_photo_url(d['sku']),
+                       'mediaContentType': 'IMAGE', 'alt': d['title']}],
+        })
+        errors = (result.get('data', {}).get('productUpdate') or {}).get('userErrors') or result.get('errors')
+        if errors:
+            log(f"  Photo not attached for {d['sku']}: {str(errors)[:160]}", 'WARNING')
+        else:
+            attached += 1
+    log(f"✓ Attached {attached} supplier photos")
+    return len(bare), attached
+
+
 def write_job_summary(stats: Dict, archive: Dict, skipped_products: List[Dict]) -> None:
     """Append the run's results to the GitHub job summary, when there is one.
 
@@ -1551,9 +1649,10 @@ def write_job_summary(stats: Dict, archive: Dict, skipped_products: List[Dict]) 
     lines = [
         "### Product sync" + (" (dry run)" if DRY_RUN else ""),
         "",
-        "| Created | Updated | Inventory | Unchanged | Drafted | Feed rows skipped |",
-        "|---|---|---|---|---|---|",
+        "| Created | Updated | Inventory | Photos added | Unchanged | Drafted | Feed rows skipped |",
+        "|---|---|---|---|---|---|---|",
         f"| {stats['created']} | {stats['updated']} | {stats['inventoried']} | "
+        f"{stats['photos']} of {stats['photoless']} without | "
         f"{stats['unchanged']} | {len(archive['drafted'])} | {len(skipped_products)} |",
         "",
     ]
@@ -1649,6 +1748,16 @@ def main():
 
     verify_existing_products(existing_products, reported_count)
 
+    # Fitment needs every row at once: a machine's parts are the rows that
+    # name it. Titles as the store shows them, so model numbers match.
+    fits, parts_by_machine = build_fitment(
+        categorized_products, lambda p: clean_title(p.get('ProductTitleEN', ''), p.get('SKU', '')))
+    for p in categorized_products:
+        p['_fits'] = fits.get(p.get('SKU'), [])
+        p['_part_skus'] = parts_by_machine.get(p.get('SKU'), [])
+    log(f"Fitment: {len(fits)} parts name the machines they fit; "
+        f"{len(parts_by_machine)} machines have a parts list")
+
     # Step 5: Calculate delta
     log("\n[5/8] Calculating delta...")
     to_create, to_update, unchanged, missing_skus = calculate_delta(
@@ -1707,6 +1816,8 @@ def main():
         # Inventory quantities (creates already get theirs via productSet)
         inventoried = sync_inventory_quantities(to_update)
 
+    photoless, photos = attach_missing_photos(to_update + unchanged, existing_products)
+
     sync_time = time.time() - sync_start
 
     # Step 8: Archive missing
@@ -1724,6 +1835,7 @@ def main():
     log(f"  ✅ Created: {created}")
     log(f"  ✏️  Updated: {updated}")
     log(f"  📦 Inventory synced: {inventoried}")
+    log(f"  🖼️  Photos added: {photos} ({photoless} live products had none)")
     log(f"  ⏭️  Unchanged: {len(unchanged)} (skipping)")
     log(f"  🗑️  Drafted: {len(archive['drafted'])} (left the feed; with 301 redirects)")
     log(f"  ⛔ Skipped: {len(skipped_products)}")
@@ -1736,7 +1848,7 @@ def main():
 
     write_job_summary(
         {'created': created, 'updated': updated, 'inventoried': inventoried,
-         'unchanged': len(unchanged)},
+         'photos': photos, 'photoless': photoless, 'unchanged': len(unchanged)},
         archive, skipped_products,
     )
     if archive['refused']:

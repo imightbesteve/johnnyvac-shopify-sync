@@ -973,31 +973,32 @@ def generate_seo_title(title: str, sku: str = '') -> str:
     It used to be assembled from keywords -- brand, a guessed style and a
     category suffix -- which produced titles like "Style As6 Replacement
     Part" that named neither the product nor its part number. The product
-    title says what the thing is, so the search result should too.
-
-    Too long, it drops whole " - " segments from the end, keeping a closing
-    part-number segment (Bissell 2036655) when one fits, and only then cuts
-    at a word."""
+    title says what the thing is, so the search result should too."""
     from title_cleaner import clean_title  # lazy: title_cleaner imports BRANDS from here
-    t = clean_title(title or '', sku) or sku
-    if len(t) <= MAX_SEO_TITLE:
-        return t
+    return fit_title(clean_title(title or '', sku) or sku, MAX_SEO_TITLE)
 
+
+def fit_title(t: str, limit: int) -> str:
+    """Fit a title to `limit` chars: drop whole " - " segments from the end,
+    keeping a closing part-number segment (Bissell 2036655) when one fits,
+    and only then cut at a word."""
+    if len(t) <= limit:
+        return t
     segs = [x for x in t.split(' - ') if x]
     tail = segs[-1] if len(segs) > 1 and re.search(r'\d', segs[-1]) and len(segs[-1]) <= 25 else None
     if tail:
         for k in range(len(segs) - 2, 0, -1):
             head = ' - '.join(segs[:k])
-            if len(f"{head} - {tail}") <= MAX_SEO_TITLE:
+            if len(f"{head} - {tail}") <= limit:
                 return f"{head} - {tail}"
-        head = _cut_words(segs[0], MAX_SEO_TITLE - len(tail) - 3)
+        head = _cut_words(segs[0], limit - len(tail) - 3)
         if len(head) >= 20:
             return f"{head} - {tail}"
     for k in range(len(segs) - 1, 0, -1):
         head = ' - '.join(segs[:k])
-        if len(head) <= MAX_SEO_TITLE:
+        if len(head) <= limit:
             return head
-    return _cut_words(t, MAX_SEO_TITLE) or t[:MAX_SEO_TITLE]
+    return _cut_words(t, limit) or t[:limit]
 
 
 def _cut_words(text: str, limit: int) -> str:
@@ -1015,70 +1016,58 @@ def _cut_words(text: str, limit: int) -> str:
         cut = trimmed
 
 
-def generate_seo_description(title: str, sku: str = '') -> str:
-    """Generate an SEO meta description (max 160 chars)."""
-    brand = extract_brand(title)
-    product_type = detect_seo_product_type(title)
-    pack_qty = extract_pack_quantity(title)
-    models = extract_model_number(title, sku)
-    style_type = extract_style_type(title)
-    category_info = CATEGORY_SEO.get(product_type, CATEGORY_SEO["parts"])
+SEO_CLOSING = ("Shop Kingsway Janitorial for fast shipping across Canada.",
+               "Fast shipping across Canada.")
 
-    if brand:
-        opener = f"{brand} {category_info['suffix'].lower()}"
-    else:
-        suffix_lower = category_info['suffix'].lower()
-        if suffix_lower.startswith("commercial"):
-            opener = category_info['suffix']
-        else:
-            opener = f"Commercial {suffix_lower}"
 
-    if style_type:
-        opener = f"{opener} ({style_type})"
-    elif models:
-        opener = f"{opener} ({models[0]})"
+def generate_seo_description(title: str, sku: str = '', supplier_text: str = '') -> str:
+    """SEO meta description (max 155 chars) built from facts about this product.
 
-    parts = [opener]
-    if pack_qty and pack_qty > 1:
-        parts.append(f"Pack of {pack_qty}")
-    parts.append(category_info["descriptors"][0].capitalize())
+    The old one was keyword filler -- "Commercial Vacuum. Commercial vacuum.
+    Commercial grade quality. Fast shipping across Canada." on hundreds of
+    pages -- which search engines ignore and shoppers skip. Now: the cleaned
+    title, then the first sentence of the supplier's description when there is
+    one, then pack size, fit and part number where they add something, then a
+    closing line, each only if it still fits."""
+    from title_cleaner import clean_title  # lazy, see generate_seo_title
+    limit = MAX_SEO_DESCRIPTION - 5
+    lead = fit_title(clean_title(title or '', sku) or sku, 110).rstrip('.')
+    text = f"{lead}."
+    seen = text.lower()
 
-    ctas = [
-        "Fast shipping across Canada.",
-        "Ships Canada-wide.",
-        "Canadian janitorial supply.",
-        "Professional grade. Ships across Canada."
-    ]
+    extras = []
+    sentence = _first_sentence(supplier_text)
+    if sentence and sentence.lower()[:30] not in seen:
+        extras.append(sentence)
+    pack = extract_pack_quantity(title)
+    if pack and pack > 1 and f"pack of {pack}" not in seen and f"{pack} pack" not in seen:
+        extras.append(f"Pack of {pack}.")
+    models = [m for m in extract_compatible_models(title) if m.lower() not in seen][:3]
+    if models:
+        extras.append(f"Fits {', '.join(models)}.")
+    if sku and '_' not in sku and sku.lower() not in seen:
+        extras.append(f"Part # {sku}.")
 
-    jv_note = ""
-    if product_type not in ["machines", "chemicals"]:
-        if (brand and "johnny" in brand.lower()) or "johnny" in (title or '').lower() or "jvac" in (title or '').lower():
-            jv_note = "JohnnyVac compatible. "
+    for extra in extras:
+        if len(text) + 1 + len(extra) <= limit:
+            text = f"{text} {extra}"
+    for closing in SEO_CLOSING:
+        if len(text) + 1 + len(closing) <= limit:
+            return f"{text} {closing}"
+    return text
 
-    main_text = ". ".join(parts) + "."
-    if jv_note:
-        main_text = main_text.replace(". ", f". {jv_note}", 1)
 
-    if len(main_text) < 60:
-        main_text = main_text.rstrip(".") + ". Commercial grade quality."
-
-    for cta in ctas:
-        test_desc = f"{main_text} {cta}"
-        if len(test_desc) <= MAX_SEO_DESCRIPTION:
-            return test_desc
-
-    if len(main_text) > MAX_SEO_DESCRIPTION - 30:
-        if brand:
-            short_text = f"{brand} {category_info['suffix'].lower()}."
-        else:
-            short_text = f"{category_info['suffix']}."
-        if pack_qty and pack_qty > 1:
-            short_text += f" {pack_qty} pack."
-        short_text += f" {jv_note}Professional grade. Ships Canada-wide."
-        if len(short_text) <= MAX_SEO_DESCRIPTION:
-            return short_text
-
-    return main_text[:MAX_SEO_DESCRIPTION]
+def _first_sentence(supplier_text: str) -> str:
+    """First sentence of the supplier's description, if it is real prose --
+    not a French placeholder, not a bare part list, not too long to use."""
+    t = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', supplier_text or '')).strip()
+    if len(t) < 40 or re.match(r'(cette|le prix|ce produit)', t, re.I):
+        return ''
+    m = re.match(r'(.{30,120}?[.!?])(\s|$)', t)
+    sentence = m.group(1) if m else ''
+    if not sentence or sentence.upper() == sentence:
+        return ''
+    return sentence
 
 
 # =============================================================================
