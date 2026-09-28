@@ -132,6 +132,19 @@ jobs:
           echo "Creating / updating Shopify automated collections..."
           python create_collections.py
 
+      # Buyable first: in stock + photo, then in stock, then sold out. Runs
+      # after the collections step so a collection it just created is ranked
+      # the same day. Only products whose place changed are moved.
+      - name: Rank collections (in stock first)
+        if: github.event_name == 'schedule' || github.event.inputs.create_collections == 'true'
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python -u sort_collections.py
+
       - name: Job summary
         if: always()
         run: |
@@ -145,7 +158,7 @@ jobs:
             echo "### Results"
             echo "- 🧹 Product sync: ${{ steps.sync.outcome }} (details above)"
             if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event.inputs.create_collections }}" == "true" ]]; then
-              echo "- 🗂️ Collections: Created / Updated"
+              echo "- 🗂️ Collections: Created / Updated, ranked in stock first"
               echo "- 🚀 Auto publish: ${{ github.event.inputs.auto_publish || 'true' }}"
             else
               echo "- 🗂️ Collections: Skipped"
