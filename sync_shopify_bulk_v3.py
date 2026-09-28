@@ -308,7 +308,10 @@ def fetch_csv_data() -> Tuple[List[Dict], List[str]]:
 
     response = requests.get(CSV_URL, timeout=60)
     response.raise_for_status()
-    lines = response.text.splitlines()
+    # The server sends text/csv with no charset, so response.text would
+    # decode the UTF-8 body as Latin-1 and every ½, ®, é would arrive as
+    # Â½, Â®, Ã© -- and be written to the store that way.
+    lines = response.content.decode('utf-8-sig').splitlines()
 
     reader = csv.DictReader(lines, delimiter=';')
 
@@ -889,7 +892,8 @@ def build_create_input(product: Dict, location_id: Optional[str]) -> Dict:
         "variants": [variant_input],
         "files": [{
             "originalSource": f"{IMAGE_BASE_URL}{d['sku']}.jpg",
-            "contentType": "IMAGE"
+            "contentType": "IMAGE",
+            "alt": d['title'],
         }]
     }
     if d['category_gid']:
@@ -1165,12 +1169,14 @@ def run_bulk_mutation(jsonl_lines: List[Dict], mutation: str, expected_count: in
 
         result = graphql_request(bulk_mutation, use_rate_limit=False)
 
-        errors = result.get('data', {}).get('bulkOperationRunMutation', {}).get('userErrors', [])
+        payload = result.get('data', {}).get('bulkOperationRunMutation', {}) or {}
+        errors = payload.get('userErrors', [])
         if errors:
             log(f"Bulk mutation error: {errors}", 'WARNING')
             return False, 0
 
-        return poll_bulk_mutation(expected_count)
+        operation_id = (payload.get('bulkOperation') or {}).get('id')
+        return poll_bulk_mutation(expected_count, operation_id)
 
     except Exception as e:
         log(f"Bulk {label} failed: {e}", 'WARNING')
@@ -1229,13 +1235,18 @@ def try_bulk_price_update(products: List[Dict]) -> Tuple[bool, int]:
     return run_bulk_mutation(lines, mutation, len(priced), 'price update')
 
 
-def poll_bulk_mutation(expected_count: int) -> Tuple[bool, int]:
-    """Poll bulk mutation until complete"""
+def poll_bulk_mutation(expected_count: int, operation_id: Optional[str] = None) -> Tuple[bool, int]:
+    """Poll bulk mutation until complete.
+
+    currentBulkOperation defaults to type QUERY, so without the type this read
+    the existing-products query that had just finished: it reported COMPLETED
+    at once with that query's product count, the sync moved on while the
+    mutation was still running, and the next bulk mutation collided with it."""
     log("Polling for bulk mutation completion...")
 
     query = """
     query {
-      currentBulkOperation {
+      currentBulkOperation(type: MUTATION) {
         id
         status
         errorCode
@@ -1256,14 +1267,20 @@ def poll_bulk_mutation(expected_count: int) -> Tuple[bool, int]:
             time.sleep(POLL_INTERVAL)
             continue
 
+        if operation_id and operation.get('id') != operation_id:
+            time.sleep(POLL_INTERVAL)
+            continue
+
         status = operation.get('status')
-        root_count = operation.get('rootObjectCount', 0)
+        root_count = int(operation.get('rootObjectCount') or 0)
 
         log(f"  Status: {status}, processed: {root_count}/{expected_count}")
 
         if status == 'COMPLETED':
-            log(f"✓ Bulk operation completed! Processed {root_count} products")
-            return True, root_count
+            failed = count_bulk_row_errors(operation.get('url'))
+            log(f"✓ Bulk operation completed! Processed {root_count} products"
+                + (f", {failed} rejected (userErrors)" if failed else ""))
+            return True, root_count - failed
         elif status in ['FAILED', 'CANCELED']:
             log(f"Bulk operation failed: {operation.get('errorCode')}", 'WARNING')
             return False, 0
@@ -1272,6 +1289,32 @@ def poll_bulk_mutation(expected_count: int) -> Tuple[bool, int]:
 
     log("Bulk operation timed out", 'WARNING')
     return False, 0
+
+
+def count_bulk_row_errors(url: Optional[str]) -> int:
+    """Rows a bulk mutation rejected. The operation reports COMPLETED even when
+    every row failed validation; the per-row userErrors are only in the result
+    file."""
+    if not url:
+        return 0
+    try:
+        response = requests.get(url, timeout=120)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        log(f"  Could not read bulk result file: {e}", 'WARNING')
+        return 0
+    failed = 0
+    for line in response.content.decode('utf-8').splitlines():
+        try:
+            data = json.loads(line).get('data') or {}
+        except ValueError:
+            continue
+        errs = [e for op in data.values() if isinstance(op, dict) for e in op.get('userErrors') or []]
+        if errs:
+            failed += 1
+            if failed <= 5:
+                log(f"  Rejected: {errs[0].get('message')} ({errs[0].get('field')})", 'WARNING')
+    return failed
 
 
 def batch_process(products: List[Dict], operation: str, func) -> int:

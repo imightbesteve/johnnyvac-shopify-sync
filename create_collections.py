@@ -105,10 +105,12 @@ def load_category_map() -> List[Dict]:
             data = json.load(f)
             categories = data.get('categories', [])
             
-            # Filter out fallback categories (priority <= 10)
+            # Filter out fallback categories (priority <= 10) unless the map
+            # asks for a collection anyway: General Parts has no keywords but
+            # holds a few hundred live products that were in no collection.
             active_categories = [
-                c for c in categories 
-                if c.get('priority', 0) > 10
+                c for c in categories
+                if c.get('priority', 0) > 10 or c.get('collection')
             ]
             
             log(f"✅ Loaded {len(active_categories)} active categories from {CATEGORY_MAP_FILE}")
@@ -569,7 +571,7 @@ def build_specs(categories: List[Dict], type_counts: Dict[str, int],
         product_type = category['productType']
         specs.append({
             'kind': 'category',
-            'title': category.get('title', product_type.split(' > ')[-1]),
+            'title': category.get('collection_title') or category.get('title', product_type.split(' > ')[-1]),
             'handle': category['handle'],
             'condition': product_type,
             'rule_column': 'TYPE',
