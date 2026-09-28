@@ -46,6 +46,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from categorizer_v4 import ProductCategorizer
 from title_cleaner import clean_title
+from fitment import build_fitment
 from product_content import (
     adapt_metafields_to_definitions, ai_available, build_description,
     compute_vendor, extract_brand, extract_compatible_models,
@@ -222,6 +223,14 @@ def get_metafield_definition_types() -> Dict[str, str]:
             log(f"Store metafield definitions (custom.*): {_metafield_def_types}")
     return _metafield_def_types
 
+def fitment_models(desired: Dict) -> List[str]:
+    """Machine models a part fits: the feed's fitment links and model numbers
+    in the title (see fitment.py), then the brand-model patterns the title
+    extractor finds (EL5010, AH10165)."""
+    extracted = extract_compatible_models(desired.get('title', ''), desired.get('product_type', ''))
+    return list(dict.fromkeys(desired.get('fits_models', []) + extracted))[:12]
+
+
 def build_metafields(desired: Dict) -> List[Dict]:
     """Structured metadata extracted from the title/type, namespace `custom`.
     custom.mpn = JohnnyVac SKU. Google accepts Brand + MPN instead of GTIN."""
@@ -241,8 +250,11 @@ def build_metafields(desired: Dict) -> List[Dict]:
     add('brand', extract_brand(title))
     add('pack_quantity', extract_pack_quantity(title), 'number_integer')
     add('material', extract_material(title))
-    add('compatible_models',
-        ', '.join(extract_compatible_models(title, desired.get('product_type', ''))))
+    add('compatible_models', ', '.join(fitment_models(desired)))
+    if desired.get('part_gids'):
+        metafields.append({"namespace": "custom", "key": "compatible_parts",
+                           "type": "list.product_reference",
+                           "value": json.dumps(desired['part_gids'], separators=(',', ':'))})
     specs = extract_dimensions(title)
     add('size_inches', specs.get('size_inches'))
     add('voltage', specs.get('voltage'))
@@ -293,6 +305,8 @@ def build_desired_state(product: Dict) -> Dict:
         ],
         'upc': product.get('upc', '') or None,
         'seo_title': generate_seo_title(title, sku),
+        'fits_models': product.get('_fits', []),
+        'part_skus': product.get('_part_skus', []),
         'seo_description': generate_seo_description(title, sku, jv_desc),
     }
 
@@ -428,6 +442,12 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
                 featuredMedia {
                   id
                 }
+                compatibleModels: metafield(namespace: "custom", key: "compatible_models") {
+                  value
+                }
+                compatibleParts: metafield(namespace: "custom", key: "compatible_parts") {
+                  value
+                }
                 variants(first: 5) {
                   edges {
                     node {
@@ -547,7 +567,17 @@ def _existing_from_product_node(obj: Dict) -> Dict:
         'seo_title': (obj.get('seo') or {}).get('title', '') or '',
         'seo_description': (obj.get('seo') or {}).get('description', '') or '',
         'has_image': bool(obj.get('featuredMedia')),
+        'compatible_models': _json_list((obj.get('compatibleModels') or {}).get('value')),
+        'compatible_parts': _json_list((obj.get('compatibleParts') or {}).get('value')),
     }
+
+
+def _json_list(value: Optional[str]) -> List[str]:
+    try:
+        parsed = json.loads(value) if value else []
+    except ValueError:
+        return [value]
+    return parsed if isinstance(parsed, list) else [str(parsed)]
 
 # SKUs seen ONLY on archived products. The catalog cleanup archives redundant
 # duplicate copies, and a SKU whose every copy is archived must not be treated
@@ -692,6 +722,8 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                     category { id }
                     seo { title description }
                     featuredMedia { id }
+                    compatibleModels: metafield(namespace: "custom", key: "compatible_models") { value }
+                    compatibleParts: metafield(namespace: "custom", key: "compatible_parts") { value }
                     variants(first: 5) {
                         edges {
                             node {
@@ -761,12 +793,14 @@ def calculate_delta(
     skipped_archived = 0
 
     counts = {'core': 0, 'price': 0, 'inventory': 0, 'vendor': 0, 'tags': 0,
-              'seo': 0, 'description': 0, 'category': 0}
+              'seo': 0, 'description': 0, 'category': 0, 'fitment': 0}
 
     for product in csv_products:
         sku = product.get('SKU', '')
         csv_skus.add(sku)
         desired = build_desired_state(product)
+        desired['part_gids'] = [existing_products[s]['product_id'] for s in desired['part_skus']
+                                if (existing_products.get(s) or {}).get('status') == 'ACTIVE']
         product['_desired'] = desired
 
         if sku not in existing_products:
@@ -800,6 +834,10 @@ def calculate_delta(
                         and SEO_MANUAL_TAG not in (existing.get('tags') or []))),
             'description': len(existing.get('description_text', '')) < MIN_DESCRIPTION_LENGTH,
             'category': bool(desired['category_gid']) and existing.get('category_id', '') != desired['category_gid'],
+            # Only a non-empty list is written, so only a non-empty one is
+            # compared -- an emptied list would otherwise re-flag every day.
+            'fitment': (bool(fitment_models(desired)) and existing.get('compatible_models') != fitment_models(desired))
+                       or (bool(desired['part_gids']) and existing.get('compatible_parts') != desired['part_gids']),
         }
 
         if any(flags.values()):
@@ -1709,6 +1747,16 @@ def main():
     log(f"  Fetch completed in {fetch_time:.1f}s")
 
     verify_existing_products(existing_products, reported_count)
+
+    # Fitment needs every row at once: a machine's parts are the rows that
+    # name it. Titles as the store shows them, so model numbers match.
+    fits, parts_by_machine = build_fitment(
+        categorized_products, lambda p: clean_title(p.get('ProductTitleEN', ''), p.get('SKU', '')))
+    for p in categorized_products:
+        p['_fits'] = fits.get(p.get('SKU'), [])
+        p['_part_skus'] = parts_by_machine.get(p.get('SKU'), [])
+    log(f"Fitment: {len(fits)} parts name the machines they fit; "
+        f"{len(parts_by_machine)} machines have a parts list")
 
     # Step 5: Calculate delta
     log("\n[5/8] Calculating delta...")
