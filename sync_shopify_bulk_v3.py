@@ -44,6 +44,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from categorizer_v4 import ProductCategorizer
+from title_cleaner import clean_title
 from product_content import (
     adapt_metafields_to_definitions, ai_available, build_description,
     compute_vendor, extract_brand, extract_compatible_models,
@@ -261,7 +262,10 @@ def build_desired_state(product: Dict) -> Dict:
     """Compute everything we want Shopify to hold for this CSV row."""
     sku = product.get('SKU', '')
     category_info = product.get('category', {})
-    title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '') or sku
+    raw_title = product.get('ProductTitleEN' if LANGUAGE == 'en' else 'ProductTitleFR', '') or sku
+    # Readable title (supplier codes, ALL CAPS, spacing -- see title_cleaner).
+    # The categorizer has already run on the raw row, so categories are unaffected.
+    title = clean_title(raw_title, sku) if LANGUAGE == 'en' else raw_title
     jv_desc = clean_html(product.get('ProductDescriptionEN' if LANGUAGE == 'en' else 'ProductDescriptionFR', ''))
     inventory = int(float(product.get('Inventory', '0') or 0))
     handle_tag = category_info.get('handle', 'uncategorized')
