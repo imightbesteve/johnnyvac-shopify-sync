@@ -65,12 +65,13 @@ class ProductCategorizer:
         if jv_category in skip_categories:
             return True, f"JV Category '{jv_category}' is in skip list"
         
-        # Check price threshold
+        # Check price threshold. $0 counts: a zero-price row went live and
+        # could be checked out for nothing.
         try:
             price = float(product.get('RegularPrice') or 0)
             max_price = self.skip_patterns.get('max_price_threshold', 0.05)
-            if price <= max_price and price > 0:
-                return True, f"Price ${price:.2f} below threshold ${max_price}"
+            if price <= max_price:
+                return True, f"Price ${price:.2f} at or below threshold ${max_price}"
         except (ValueError, TypeError):
             pass
         
