@@ -39,6 +39,7 @@ import time
 import requests
 import threading
 import uuid
+from urllib.parse import quote
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -423,6 +424,9 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
                   title
                   description
                 }
+                featuredMedia {
+                  id
+                }
                 variants(first: 5) {
                   edges {
                     node {
@@ -541,6 +545,7 @@ def _existing_from_product_node(obj: Dict) -> Dict:
         'category_id': (obj.get('category') or {}).get('id', '') or '',
         'seo_title': (obj.get('seo') or {}).get('title', '') or '',
         'seo_description': (obj.get('seo') or {}).get('description', '') or '',
+        'has_image': bool(obj.get('featuredMedia')),
     }
 
 # SKUs seen ONLY on archived products. The catalog cleanup archives redundant
@@ -685,6 +690,7 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                     description(truncateAt: 200)
                     category { id }
                     seo { title description }
+                    featuredMedia { id }
                     variants(first: 5) {
                         edges {
                             node {
@@ -1535,6 +1541,63 @@ def archive_missing_products(missing_skus: List[str], existing_products: Dict[st
     return result
 
 
+PRODUCT_MEDIA_MUTATION = """
+mutation productUpdate($product: ProductUpdateInput!, $media: [CreateMediaInput!]) {
+    productUpdate(product: $product, media: $media) {
+        product { id }
+        userErrors { field message }
+    }
+}
+"""
+
+
+def supplier_photo_url(sku: str) -> str:
+    return f"{IMAGE_BASE_URL}{quote(sku)}.jpg"
+
+
+def attach_missing_photos(products: List[Dict], existing_products: Dict[str, Dict]) -> Tuple[int, int]:
+    """Give live products without a photo the supplier's, once it exists.
+
+    The photo is attached when a product is created, and the supplier often
+    publishes it later -- 129 products were found waiting on 2026-09-28. So
+    every run checks the image-less ones (a HEAD request each, in parallel)
+    and attaches whatever has appeared. Returns (without a photo, attached)."""
+    bare = [p for p in products
+            if (existing_products.get(p['_desired']['sku']) or {}).get('status') == 'ACTIVE'
+            and not existing_products[p['_desired']['sku']].get('has_image')]
+    if not bare:
+        return 0, 0
+
+    def available(p: Dict) -> bool:
+        try:
+            r = requests.head(supplier_photo_url(p['_desired']['sku']), timeout=15, allow_redirects=True)
+            return r.status_code == 200 and r.headers.get('Content-Type', '').startswith('image/')
+        except requests.exceptions.RequestException:
+            return False
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        found = [p for p, ok in zip(bare, pool.map(available, bare)) if ok]
+    log(f"\nPhotos: {len(bare)} live products have none; the supplier now has {len(found)}")
+    if DRY_RUN or not found:
+        return len(bare), len(found) if DRY_RUN else 0
+
+    attached = 0
+    for p in found:
+        d = p['_desired']
+        result = graphql_request(PRODUCT_MEDIA_MUTATION, {
+            'product': {'id': existing_products[d['sku']]['product_id']},
+            'media': [{'originalSource': supplier_photo_url(d['sku']),
+                       'mediaContentType': 'IMAGE', 'alt': d['title']}],
+        })
+        errors = (result.get('data', {}).get('productUpdate') or {}).get('userErrors') or result.get('errors')
+        if errors:
+            log(f"  Photo not attached for {d['sku']}: {str(errors)[:160]}", 'WARNING')
+        else:
+            attached += 1
+    log(f"✓ Attached {attached} supplier photos")
+    return len(bare), attached
+
+
 def write_job_summary(stats: Dict, archive: Dict, skipped_products: List[Dict]) -> None:
     """Append the run's results to the GitHub job summary, when there is one.
 
@@ -1551,9 +1614,10 @@ def write_job_summary(stats: Dict, archive: Dict, skipped_products: List[Dict]) 
     lines = [
         "### Product sync" + (" (dry run)" if DRY_RUN else ""),
         "",
-        "| Created | Updated | Inventory | Unchanged | Drafted | Feed rows skipped |",
-        "|---|---|---|---|---|---|",
+        "| Created | Updated | Inventory | Photos added | Unchanged | Drafted | Feed rows skipped |",
+        "|---|---|---|---|---|---|---|",
         f"| {stats['created']} | {stats['updated']} | {stats['inventoried']} | "
+        f"{stats['photos']} of {stats['photoless']} without | "
         f"{stats['unchanged']} | {len(archive['drafted'])} | {len(skipped_products)} |",
         "",
     ]
@@ -1707,6 +1771,8 @@ def main():
         # Inventory quantities (creates already get theirs via productSet)
         inventoried = sync_inventory_quantities(to_update)
 
+    photoless, photos = attach_missing_photos(to_update + unchanged, existing_products)
+
     sync_time = time.time() - sync_start
 
     # Step 8: Archive missing
@@ -1724,6 +1790,7 @@ def main():
     log(f"  ✅ Created: {created}")
     log(f"  ✏️  Updated: {updated}")
     log(f"  📦 Inventory synced: {inventoried}")
+    log(f"  🖼️  Photos added: {photos} ({photoless} live products had none)")
     log(f"  ⏭️  Unchanged: {len(unchanged)} (skipping)")
     log(f"  🗑️  Drafted: {len(archive['drafted'])} (left the feed; with 301 redirects)")
     log(f"  ⛔ Skipped: {len(skipped_products)}")
@@ -1736,7 +1803,7 @@ def main():
 
     write_job_summary(
         {'created': created, 'updated': updated, 'inventoried': inventoried,
-         'unchanged': len(unchanged)},
+         'photos': photos, 'photoless': photoless, 'unchanged': len(unchanged)},
         archive, skipped_products,
     )
     if archive['refused']:
