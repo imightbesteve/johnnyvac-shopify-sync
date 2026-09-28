@@ -1865,7 +1865,9 @@
       "keywords_fr": [],
       "exclusions_en": [],
       "exclusions_fr": [],
-      "min_products": 1
+      "min_products": 1,
+      "collection": true,
+      "collection_title": "Other Parts"
     },
     {
       "productType": "Other > Needs Review",
