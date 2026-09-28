@@ -968,50 +968,51 @@ def detect_seo_product_type(title: str, description: str = "") -> str:
 
 
 def generate_seo_title(title: str, sku: str = '') -> str:
-    """Generate an SEO meta title (max 60 chars)."""
-    brand = extract_brand(title)
-    product_type = detect_seo_product_type(title)
-    pack_qty = extract_pack_quantity(title)
-    models = extract_model_number(title, sku)
-    style_type = extract_style_type(title)
-    category_info = CATEGORY_SEO.get(product_type, CATEGORY_SEO["parts"])
+    """SEO meta title: the product's own (cleaned) title, fitted to 60 chars.
 
-    parts = []
-    if brand:
-        parts.append(brand)
-    if style_type:
-        parts.append(style_type)
-    elif models:
-        parts.append(models[0])
-    parts.append(category_info["suffix"])
-    if pack_qty and pack_qty > 1:
-        parts.append(f"{pack_qty} Pack")
+    It used to be assembled from keywords -- brand, a guessed style and a
+    category suffix -- which produced titles like "Style As6 Replacement
+    Part" that named neither the product nor its part number. The product
+    title says what the thing is, so the search result should too.
 
-    seo_title = " ".join(parts)
+    Too long, it drops whole " - " segments from the end, keeping a closing
+    part-number segment (Bissell 2036655) when one fits, and only then cuts
+    at a word."""
+    from title_cleaner import clean_title  # lazy: title_cleaner imports BRANDS from here
+    t = clean_title(title or '', sku) or sku
+    if len(t) <= MAX_SEO_TITLE:
+        return t
 
-    if len(seo_title) > MAX_SEO_TITLE:
-        parts = []
-        if brand:
-            parts.append(brand)
-        parts.append(category_info["suffix"])
-        seo_title = " ".join(parts)
+    segs = [x for x in t.split(' - ') if x]
+    tail = segs[-1] if len(segs) > 1 and re.search(r'\d', segs[-1]) and len(segs[-1]) <= 25 else None
+    if tail:
+        for k in range(len(segs) - 2, 0, -1):
+            head = ' - '.join(segs[:k])
+            if len(f"{head} - {tail}") <= MAX_SEO_TITLE:
+                return f"{head} - {tail}"
+        head = _cut_words(segs[0], MAX_SEO_TITLE - len(tail) - 3)
+        if len(head) >= 20:
+            return f"{head} - {tail}"
+    for k in range(len(segs) - 1, 0, -1):
+        head = ' - '.join(segs[:k])
+        if len(head) <= MAX_SEO_TITLE:
+            return head
+    return _cut_words(t, MAX_SEO_TITLE) or t[:MAX_SEO_TITLE]
 
-    if len(seo_title) < 25:
-        if not brand and not seo_title.lower().startswith("commercial"):
-            seo_title = f"Commercial {seo_title}"
-        if len(seo_title) < 25:
-            seo_title = f"{seo_title} | Vacuum Part"
-        if len(seo_title) < 25 and models:
-            seo_title = f"{seo_title} {models[0]}"
 
-    if len(seo_title) > MAX_SEO_TITLE or len(seo_title) < 20:
-        clean_title = re.sub(r'\s+', ' ', title or '').strip()
-        clean_title = re.sub(r'\b(vacuum|for|and|the|pack of \d+)\b', '', clean_title, flags=re.IGNORECASE)
-        clean_title = re.sub(r'\s+', ' ', clean_title).strip()
-        clean_title = truncate_text(clean_title, MAX_SEO_TITLE - 15)
-        seo_title = f"{clean_title} | Replacement"
-
-    return truncate_text(seo_title, MAX_SEO_TITLE)
+def _cut_words(text: str, limit: int) -> str:
+    """Cut at a word so it fits, never ending on a connector or open bracket."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit + 1].rsplit(' ', 1)[0]
+    while True:
+        trimmed = re.sub(r'[\s,;:/(+-]+$', '', cut)
+        trimmed = re.sub(r'\s+(?:a|an|and|or|of|for|with|to|the|in|on|by|per|from|w/)$', '', trimmed, flags=re.I)
+        if trimmed.count('(') > trimmed.count(')'):
+            trimmed = trimmed[:trimmed.rfind('(')]
+        if trimmed == cut:
+            return cut
+        cut = trimmed
 
 
 def generate_seo_description(title: str, sku: str = '') -> str:

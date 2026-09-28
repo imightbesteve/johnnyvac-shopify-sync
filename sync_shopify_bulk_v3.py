@@ -71,6 +71,7 @@ ARCHIVE_MISSING = os.environ.get('ARCHIVE_MISSING', 'true').lower() == 'true'
 # Most live products one run may draft. A feed that comes back short makes
 # every absent SKU look delisted; past this many the run drafts nothing and
 # fails instead, so the failure email is the alert.
+SEO_MANUAL_TAG = 'seo:manual'
 MAX_ARCHIVE_PER_RUN = int(os.environ.get('MAX_ARCHIVE_PER_RUN', '50'))
 
 # Out-of-stock products stay ACTIVE and show as "Sold out" instead of being
@@ -290,6 +291,7 @@ def build_desired_state(product: Dict) -> Dict:
             f"source:{category_info.get('source', 'unknown')}"
         ],
         'upc': product.get('upc', '') or None,
+        'seo_title': generate_seo_title(title, sku),
     }
 
 # =============================================================================
@@ -419,6 +421,7 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
                 }
                 seo {
                   title
+                  description
                 }
                 variants(first: 5) {
                   edges {
@@ -537,6 +540,7 @@ def _existing_from_product_node(obj: Dict) -> Dict:
         'description_text': strip_html(obj.get('description', '') or ''),
         'category_id': (obj.get('category') or {}).get('id', '') or '',
         'seo_title': (obj.get('seo') or {}).get('title', '') or '',
+        'seo_description': (obj.get('seo') or {}).get('description', '') or '',
     }
 
 # SKUs seen ONLY on archived products. The catalog cleanup archives redundant
@@ -680,7 +684,7 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                     tags
                     description(truncateAt: 200)
                     category { id }
-                    seo { title }
+                    seo { title description }
                     variants(first: 5) {
                         edges {
                             node {
@@ -781,7 +785,11 @@ def calculate_delta(
             'inventory': existing.get('inventory', 0) != desired['inventory'],
             'vendor': existing.get('vendor', '') != desired['vendor'],
             'tags': set(existing.get('tags', [])) != set(final_tags),
-            'seo': not existing.get('seo_title'),
+            # The sync owns the SEO title (every stored one was generated);
+            # tag a product seo:manual to keep a hand-written one.
+            'seo': (not existing.get('seo_title')
+                    or (existing.get('seo_title') != desired['seo_title']
+                        and SEO_MANUAL_TAG not in (existing.get('tags') or []))),
             'description': len(existing.get('description_text', '')) < MIN_DESCRIPTION_LENGTH,
             'category': bool(desired['category_gid']) and existing.get('category_id', '') != desired['category_gid'],
         }
@@ -888,7 +896,7 @@ def build_create_input(product: Dict, location_id: Optional[str]) -> Dict:
         "tags": sorted(set(d['managed_tags'])),
         "metafields": build_metafields(d),
         "seo": {
-            "title": generate_seo_title(d['title'], d['sku']),
+            "title": d['seo_title'],
             "description": generate_seo_description(d['title'], d['sku']),
         },
         "productOptions": [
@@ -926,11 +934,12 @@ def build_update_input(product: Dict) -> Dict:
     # clobber enriched content.
     if flags.get('description'):
         update_input["descriptionHtml"] = description_for(product)
-    # Only set SEO when the product has none (manual SEO edits are kept).
+    # SEO title follows the product title; the description is only filled
+    # when empty, so rewriting titles does not touch it.
     if flags.get('seo'):
         update_input["seo"] = {
-            "title": generate_seo_title(d['title'], d['sku']),
-            "description": generate_seo_description(d['title'], d['sku']),
+            "title": d['seo_title'],
+            "description": existing.get('seo_description') or generate_seo_description(d['title'], d['sku']),
         }
     if flags.get('category') and d['category_gid']:
         update_input["category"] = d['category_gid']
