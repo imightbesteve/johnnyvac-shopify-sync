@@ -293,6 +293,7 @@ def build_desired_state(product: Dict) -> Dict:
         ],
         'upc': product.get('upc', '') or None,
         'seo_title': generate_seo_title(title, sku),
+        'seo_description': generate_seo_description(title, sku, jv_desc),
     }
 
 # =============================================================================
@@ -791,10 +792,11 @@ def calculate_delta(
             'inventory': existing.get('inventory', 0) != desired['inventory'],
             'vendor': existing.get('vendor', '') != desired['vendor'],
             'tags': set(existing.get('tags', [])) != set(final_tags),
-            # The sync owns the SEO title (every stored one was generated);
-            # tag a product seo:manual to keep a hand-written one.
+            # The sync owns SEO title + description (every stored one was
+            # generated); tag a product seo:manual to keep hand-written ones.
             'seo': (not existing.get('seo_title')
-                    or (existing.get('seo_title') != desired['seo_title']
+                    or ((existing.get('seo_title') != desired['seo_title']
+                         or existing.get('seo_description') != desired['seo_description'])
                         and SEO_MANUAL_TAG not in (existing.get('tags') or []))),
             'description': len(existing.get('description_text', '')) < MIN_DESCRIPTION_LENGTH,
             'category': bool(desired['category_gid']) and existing.get('category_id', '') != desired['category_gid'],
@@ -903,7 +905,7 @@ def build_create_input(product: Dict, location_id: Optional[str]) -> Dict:
         "metafields": build_metafields(d),
         "seo": {
             "title": d['seo_title'],
-            "description": generate_seo_description(d['title'], d['sku']),
+            "description": d['seo_description'],
         },
         "productOptions": [
             {"name": "Title", "values": [{"name": "Default Title"}]}
@@ -940,13 +942,8 @@ def build_update_input(product: Dict) -> Dict:
     # clobber enriched content.
     if flags.get('description'):
         update_input["descriptionHtml"] = description_for(product)
-    # SEO title follows the product title; the description is only filled
-    # when empty, so rewriting titles does not touch it.
     if flags.get('seo'):
-        update_input["seo"] = {
-            "title": d['seo_title'],
-            "description": existing.get('seo_description') or generate_seo_description(d['title'], d['sku']),
-        }
+        update_input["seo"] = {"title": d['seo_title'], "description": d['seo_description']}
     if flags.get('category') and d['category_gid']:
         update_input["category"] = d['category_gid']
     return update_input
