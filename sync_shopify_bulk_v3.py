@@ -1711,6 +1711,9 @@ def main():
     log("\n[1/8] Initializing categorization system...")
     categorizer = ProductCategorizer('category_map_v4.json')
     known_handles = set(categorizer.category_by_handle.keys())
+    # Handles of categories that were merged away: still sync-owned tags, so
+    # they get stripped from products instead of surviving as "manual" tags.
+    known_handles |= set(categorizer.rules.get('settings', {}).get('retired_handles', []))
 
     # Step 2: Fetch CSV
     log("\n[2/8] Fetching CSV data...")

@@ -195,6 +195,16 @@ def get_product_counts() -> Tuple[Dict[str, int], Dict[str, int]]:
     return type_counts, vendor_counts
 
 
+def load_brand_groups() -> Dict[str, List[str]]:
+    """brand_groups from the category map: {collection brand: [vendors it covers]}.
+    Sister brands (Simplicity + Riccar) share one brand collection."""
+    try:
+        with open(CATEGORY_MAP_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f).get('brand_groups', {}) or {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
 def collection_exists_by_handle(handle: str) -> Optional[Dict]:
     """Check if a collection already exists by handle"""
     query = '''
@@ -205,6 +215,7 @@ def collection_exists_by_handle(handle: str) -> Optional[Dict]:
         title
         descriptionHtml
         seo { title description }
+        ruleSet { appliedDisjunctively rules { column relation condition } }
         productsCount {
           count
         }
@@ -240,19 +251,77 @@ def collection_exists_by_handle(handle: str) -> Optional[Dict]:
         return None
 
 
+def build_rule_set(rule_column: str, conditions: List[str]) -> Dict:
+    """EQUALS rule per condition; more than one condition matches any."""
+    return {
+        "appliedDisjunctively": len(conditions) > 1,
+        "rules": [
+            {"column": rule_column, "relation": "EQUALS", "condition": c}
+            for c in conditions
+        ]
+    }
+
+
+def rule_set_matches(existing: Optional[Dict], rule_column: str,
+                     conditions: List[str]) -> bool:
+    """True when the live rule set already covers exactly these conditions."""
+    rules = (existing or {}).get('rules') or []
+    live = {(r.get('column'), r.get('relation'), r.get('condition')) for r in rules}
+    want = {(rule_column, 'EQUALS', c) for c in conditions}
+    if live != want:
+        return False
+    return len(conditions) < 2 or bool(existing.get('appliedDisjunctively'))
+
+
+def update_collection_rules(collection_gid: str, rule_column: str,
+                            conditions: List[str]) -> bool:
+    """Point an existing smart collection at a new set of conditions."""
+    mutation = '''
+    mutation collectionUpdate($input: CollectionInput!) {
+      collectionUpdate(input: $input) {
+        collection { id }
+        userErrors { field message }
+      }
+    }
+    '''
+    variables = {"input": {"id": collection_gid,
+                           "ruleSet": build_rule_set(rule_column, conditions)}}
+    try:
+        response = requests.post(
+            GRAPHQL_URL,
+            headers=HEADERS,
+            json={"query": mutation, "variables": variables},
+            timeout=30
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if 'errors' in payload:
+            log(f"  ⚠️  Collection rule update errors: {payload['errors']}")
+            return False
+        errors = (payload.get('data') or {}).get('collectionUpdate', {}).get('userErrors', [])
+        if errors:
+            log(f"  ⚠️  Collection rule update user errors: {errors}")
+            return False
+        return True
+    except Exception as e:
+        log(f"  ⚠️  Error updating collection rules: {e}")
+        return False
+
+
 def create_automated_collection(
     title: str,
     handle: str,
-    condition: str,
+    conditions: List[str],
     description: str = None,
     rule_column: str = 'TYPE',
     seo: Optional[Dict] = None
 ) -> Optional[Dict]:
-    """Create an automated collection with a productType or vendor rule"""
+    """Create an automated collection with productType or vendor rules
+    (several conditions = match any of them)"""
 
     # Create a nice description
     if not description:
-        description = category_description(title, condition)
+        description = category_description(title, conditions[0])
 
     mutation = '''
     mutation CollectionCreate($input: CollectionInput!) {
@@ -284,16 +353,7 @@ def create_automated_collection(
             "handle": handle,
             "descriptionHtml": description,
             "seo": seo or collection_seo(title, 'brand' if rule_column == 'VENDOR' else 'category'),
-            "ruleSet": {
-                "appliedDisjunctively": False,
-                "rules": [
-                    {
-                        "column": rule_column,
-                        "relation": "EQUALS",
-                        "condition": condition
-                    }
-                ]
-            }
+            "ruleSet": build_rule_set(rule_column, conditions)
         }
     }
     
@@ -477,9 +537,9 @@ def publish_collection(collection_gid: str) -> bool:
 def sync_collections(specs: List[Dict]) -> Dict[str, int]:
     """Create (or content-backfill) one collection per spec.
 
-    spec = {title, handle, condition, rule_column, count, min_products, kind}
+    spec = {title, handle, conditions, rule_column, count, min_products, kind}
     """
-    stats = {'created': 0, 'updated': 0, 'skipped_exists': 0,
+    stats = {'created': 0, 'updated': 0, 'rules_updated': 0, 'skipped_exists': 0,
              'skipped_threshold': 0, 'failed': 0}
 
     for spec in specs:
@@ -487,7 +547,10 @@ def sync_collections(specs: List[Dict]) -> Dict[str, int]:
         handle = spec['handle']
         kind = spec.get('kind', 'category')
 
-        log(f"📦 {spec['condition']}")
+        conditions = spec['conditions']
+        rule_column = spec.get('rule_column', 'TYPE')
+
+        log(f"📦 {' + '.join(conditions)}")
         log(f"   Handle: {handle}")
         log(f"   Products: {spec['count']} (min: {spec['min_products']})")
 
@@ -499,13 +562,24 @@ def sync_collections(specs: List[Dict]) -> Dict[str, int]:
 
         description = (brand_description(title, spec['count'])
                        if kind == 'brand'
-                       else category_description(title, spec['condition']))
+                       else category_description(title, conditions[0]))
         seo = collection_seo(title, kind)
 
         # Check if already exists
         existing = collection_exists_by_handle(handle)
         if existing:
             count = existing.get('productsCount', 0)
+            # A grouped collection (several vendors under one brand) that was
+            # created before the group existed still has the single-vendor
+            # rule: widen it. Single-condition collections are left alone so
+            # rules edited by hand in the admin survive.
+            if len(conditions) > 1 and not rule_set_matches(
+                    existing.get('ruleSet'), rule_column, conditions):
+                log(f"   🔧 Updating rules to: {' OR '.join(conditions)}")
+                if update_collection_rules(existing['id'], rule_column, conditions):
+                    stats['rules_updated'] += 1
+                else:
+                    stats['failed'] += 1
             # Backfill description + SEO when missing/thin; never replace
             # a hand-written description.
             existing_desc = strip_html(existing.get('descriptionHtml', ''))
@@ -531,9 +605,9 @@ def sync_collections(specs: List[Dict]) -> Dict[str, int]:
         # Create collection
         log(f"   🔨 Creating...")
         collection = create_automated_collection(
-            title, handle, spec['condition'],
+            title, handle, conditions,
             description=description,
-            rule_column=spec.get('rule_column', 'TYPE'),
+            rule_column=rule_column,
             seo=seo
         )
 
@@ -564,27 +638,48 @@ def slugify(text: str) -> str:
 
 
 def build_specs(categories: List[Dict], type_counts: Dict[str, int],
-                vendor_counts: Dict[str, int]) -> List[Dict]:
-    """Category specs from the taxonomy + brand specs from live vendor data."""
+                vendor_counts: Dict[str, int],
+                brand_groups: Optional[Dict[str, List[str]]] = None) -> List[Dict]:
+    """Category specs from the taxonomy + brand specs from live vendor data.
+
+    One spec per collection handle: map entries that share a handle (keyword
+    sets folded into another category) and vendors listed in a brand group
+    produce a single collection, not one each.
+    """
     specs = []
+    seen_handles = set()
     for category in categories:
         product_type = category['productType']
+        if category['handle'] in seen_handles:
+            continue
+        seen_handles.add(category['handle'])
         specs.append({
             'kind': 'category',
             'title': category.get('collection_title') or category.get('title', product_type.split(' > ')[-1]),
             'handle': category['handle'],
-            'condition': product_type,
+            'conditions': [product_type],
             'rule_column': 'TYPE',
             'count': type_counts.get(product_type, 0),
             'min_products': category.get('min_products', 1),
         })
 
-    for vendor, count in sorted(vendor_counts.items(), key=lambda kv: -kv[1]):
+    # Fold grouped vendors into the brand that owns the collection
+    brand_groups = brand_groups or {}
+    owner_of = {v: brand for brand, vendors in brand_groups.items() for v in vendors}
+    brand_counts: Dict[str, int] = {}
+    for vendor, count in vendor_counts.items():
+        brand = owner_of.get(vendor, vendor)
+        brand_counts[brand] = brand_counts.get(brand, 0) + count
+
+    for brand, count in sorted(brand_counts.items(), key=lambda kv: -kv[1]):
+        vendors = list(brand_groups.get(brand) or [brand])
+        if brand not in vendors:
+            vendors.insert(0, brand)
         specs.append({
             'kind': 'brand',
-            'title': vendor,
-            'handle': f"brand-{slugify(vendor)}",
-            'condition': vendor,
+            'title': brand,
+            'handle': f"brand-{slugify(brand)}",
+            'conditions': vendors,
             'rule_column': 'VENDOR',
             'count': count,
             'min_products': BRAND_MIN_PRODUCTS,
@@ -644,7 +739,7 @@ def main():
     type_counts, vendor_counts = get_product_counts()
 
     # Category collections + brand collections
-    specs = build_specs(categories, type_counts, vendor_counts)
+    specs = build_specs(categories, type_counts, vendor_counts, load_brand_groups())
     n_brands = sum(1 for s in specs if s['kind'] == 'brand')
     log("")
     log("=" * 70)
@@ -660,6 +755,7 @@ def main():
     log("=" * 70)
     log(f"✅ Created:             {stats['created']}")
     log(f"✏️  Content backfilled:  {stats['updated']}")
+    log(f"🔧 Rules updated:       {stats['rules_updated']}")
     log(f"⏭️  Skipped (exists):    {stats['skipped_exists']}")
     log(f"⏭️  Skipped (threshold): {stats['skipped_threshold']}")
     log(f"❌ Failed:              {stats['failed']}")

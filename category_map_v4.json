@@ -1,7 +1,7 @@
 {
   "settings": {
-    "version": "4.3",
-    "description": "Category map v4.3 — Added missing keywords from needs_review analysis, encoding-safe skip patterns",
+    "version": "4.4",
+    "description": "Category map v4.4 — Safety & PPE folded into Gloves & Safety, HEPA Vacuums folded into Commercial Vacuums, Riccar grouped under Simplicity",
     "notes": [
       "1. First try to map using JohnnyVac's ProductCategory field (jv_category_mappings)",
       "2. If JV category is generic (All Parts, Johnny Vac Parts), use keyword matching",
@@ -13,7 +13,11 @@
       "8. v4.2: Lowered Safety & PPE min_products from 2 to 1",
       "9. v4.3: Added ~15 missing keywords: joint, noise suppression, control module, spacer, hex, strainer, powerhead, label, etc.",
       "10. v4.3: Added encoding-tolerant French skip patterns for mojibake edge cases",
-      "11. v4.3: Added label/sticker/decal to global_part_keywords"
+      "11. v4.3: Added label/sticker/decal to global_part_keywords",
+      "12. v4.4: 'Ops & Safety > Safety & PPE' merged into 'Ops & Safety > Gloves' (collection title 'Gloves & Safety')",
+      "13. v4.4: 'Equipment & Machines > HEPA Vacuums' merged into 'Equipment & Machines > Commercial Vacuums'",
+      "14. v4.4: brand_groups — one brand collection can cover several vendors (Simplicity + Riccar)",
+      "15. v4.4: retired_handles — category handles the sync no longer uses; their tags are removed from products"
     ],
     "skip_patterns": {
       "description": "Products matching these patterns should be skipped entirely",
@@ -148,6 +152,10 @@
       "control",
       "module",
       "head"
+    ],
+    "retired_handles": [
+      "ops-safety-ppe",
+      "equipment-hepa-vacuums"
     ]
   },
   "jv_category_mappings": {
@@ -468,8 +476,8 @@
       "confidence": "high"
     },
     "HEPA Specialized Vacuums": {
-      "productType": "Equipment & Machines > HEPA Vacuums",
-      "handle": "equipment-hepa-vacuums",
+      "productType": "Equipment & Machines > Commercial Vacuums",
+      "handle": "equipment-commercial-vacuums",
       "confidence": "high"
     },
     "Residential Vacuums": {
@@ -484,6 +492,12 @@
     "": null,
     "0": null,
     "0.000000": null
+  },
+  "brand_groups": {
+    "Simplicity": [
+      "Simplicity",
+      "Riccar"
+    ]
   },
   "categories": [
     {
@@ -1526,9 +1540,9 @@
       "min_products": 1
     },
     {
-      "productType": "Equipment & Machines > HEPA Vacuums",
-      "handle": "equipment-hepa-vacuums",
-      "title": "HEPA Specialized Vacuums",
+      "productType": "Equipment & Machines > Commercial Vacuums",
+      "handle": "equipment-commercial-vacuums",
+      "title": "Commercial Vacuums",
       "priority": 55,
       "keywords_en": [
         "hepa vacuum",
@@ -1810,7 +1824,7 @@
     {
       "productType": "Ops & Safety > Gloves",
       "handle": "ops-gloves",
-      "title": "Gloves",
+      "title": "Gloves & Safety",
       "priority": 60,
       "keywords_en": [
         "glove",
@@ -1818,21 +1832,7 @@
         "latex",
         "vinyl",
         "disposable glove",
-        "work glove"
-      ],
-      "keywords_fr": [
-        "gant"
-      ],
-      "exclusions_en": [],
-      "exclusions_fr": [],
-      "min_products": 2
-    },
-    {
-      "productType": "Ops & Safety > Safety & PPE",
-      "handle": "ops-safety-ppe",
-      "title": "Safety & PPE",
-      "priority": 60,
-      "keywords_en": [
+        "work glove",
         "mask",
         "respirator",
         "safety glasses",
@@ -1848,13 +1848,14 @@
         "n95"
       ],
       "keywords_fr": [
+        "gant",
         "masque",
         "protection",
         "lunettes"
       ],
       "exclusions_en": [],
       "exclusions_fr": [],
-      "min_products": 1
+      "min_products": 2
     },
     {
       "productType": "Parts & Replacement Parts > General Parts",

@@ -1111,7 +1111,6 @@ TAXONOMY_BY_HANDLE = {
     "equipment-backpack-vacuums":   _T + "hg-9-10",      # Vacuums
     "equipment-canister-vacuums":   _T + "hg-9-10-1",    # Canister Vacs
     "equipment-wet-dry-vacuums":    _T + "hg-9-10",
-    "equipment-hepa-vacuums":       _T + "hg-9-10",
     "equipment-commercial-vacuums": _T + "hg-9-10",
     "equipment-floor-machines":     _T + "hg-9-3",       # Floor & Steam Cleaners
     "equipment-automatic-scrubbers": _T + "hg-9-3-4",    # Floor Scrubbers
@@ -1120,7 +1119,6 @@ TAXONOMY_BY_HANDLE = {
     "equipment-pressure-washers":   _T + "hg-12-3-12",   # Pressure Washers
     # Ops & Safety
     "ops-gloves":     _T + "hg-10-6-6",  # Cleaning Gloves
-    "ops-safety-ppe": _T + "bi-25",      # Work Safety Protective Gear
 }
 
 

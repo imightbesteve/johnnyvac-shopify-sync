@@ -51,7 +51,7 @@ minted token picks them up:
 
 ## What gets written to each product
 
-- **Core**: title, product type (37-category taxonomy from
+- **Core**: title, product type (35-category taxonomy from
   `category_map_v4.json`), vendor (detected brand), status, tags
   (manual tags preserved; only `confidence:*`, `source:*` and the
   category handle are managed).
@@ -76,7 +76,12 @@ minted token picks them up:
   (productType rule), created once it meets the category's
   `min_products` threshold.
 - **Brand collections** (`/collections/brand-<name>`) — one per detected
-  vendor with ≥ 5 active products (vendor rule).
+  vendor with ≥ 5 active products (vendor rule). `brand_groups` in
+  `category_map_v4.json` puts sister brands in one collection
+  (Simplicity also covers Riccar).
+- To merge two categories, point both at one `productType`/`handle` in
+  the map and list the dropped handle under `settings.retired_handles` —
+  the sync then stops recreating the old collection and removes its tag.
 - Every collection gets a storefront description + SEO title/description.
   Existing collections with missing/thin descriptions are backfilled;
   hand-written descriptions are never touched.
