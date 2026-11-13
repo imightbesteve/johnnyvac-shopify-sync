@@ -137,7 +137,8 @@ HEADERS = {
 RATE_LIMIT_PER_SECOND = 2
 MAX_CONCURRENT = 4
 REQUEST_TIMEOUT = 30
-MAX_RETRIES = 3
+MAX_RETRIES = 4
+TRANSIENT_HTTP = {404, 429, 500, 502, 503, 504}
 
 # Bulk operation settings
 POLL_INTERVAL = 10
@@ -204,6 +205,15 @@ def graphql_request(query: str, variables: Optional[Dict] = None, use_rate_limit
     for attempt in range(MAX_RETRIES):
         try:
             response = requests.post(GRAPHQL_URL, json=payload, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            # Shopify now and then answers one request with a 404 / 429 / 5xx
+            # and the next one is fine. One of those must not end a run that
+            # is 600 products into an archive pass (it did, 2026-11-13).
+            if response.status_code in TRANSIENT_HTTP and attempt < MAX_RETRIES - 1:
+                wait = float(response.headers.get('Retry-After') or (attempt + 1) * 5)
+                log(f"HTTP {response.status_code} from Shopify, retry {attempt + 1}/{MAX_RETRIES} "
+                    f"in {wait:.0f}s...", 'WARNING')
+                time.sleep(wait)
+                continue
             response.raise_for_status()
             result = response.json()
 
@@ -1637,8 +1647,9 @@ def create_url_redirect(path: str, target: str) -> bool:
 
     errors = result.get('data', {}).get('urlRedirectCreate', {}).get('userErrors', [])
     if errors:
-        # "already exists" is fine — the redirect is in place
-        if any('exists' in (e.get('message') or '').lower() for e in errors):
+        # "already exists" / "has already been taken" is fine — a redirect
+        # for this path is in place (the redirect backfill made most of them)
+        if any(w in (e.get('message') or '').lower() for e in errors for w in ('exists', 'taken')):
             return True
         log(f"Redirect {path} failed: {errors}", 'WARNING')
         return False
@@ -1759,14 +1770,29 @@ def retire_products(feed_skus: Set[str], blocked: Dict[str, str],
         log(f"Refusing to archive anything: {result['reason']}", 'ERROR')
         return result
 
-    for record in gone:
-        if archive_product(record, known_handles):
-            result['archived'].append(record)
-        if len(result['archived']) % 100 == 0 and result['archived']:
+    # One product failing (after the request's own retries) is logged and
+    # left for the next run; it does not stop the rest.
+    failed = 0
+    for i, record in enumerate(gone, 1):
+        try:
+            if archive_product(record, known_handles):
+                result['archived'].append(record)
+            else:
+                failed += 1
+        except requests.exceptions.RequestException as e:
+            failed += 1
+            log(f"  Could not archive {record['sku']}: {e}", 'WARNING')
+        if i % 100 == 0:
             log(f"  Archived {len(result['archived'])}/{len(gone)}")
     for record in hold:
-        if DRY_RUN or set_product_status(record, 'DRAFT'):
-            result['drafted'].append(record)
+        try:
+            if DRY_RUN or set_product_status(record, 'DRAFT'):
+                result['drafted'].append(record)
+        except requests.exceptions.RequestException as e:
+            failed += 1
+            log(f"  Could not draft {record['sku']}: {e}", 'WARNING')
+    if failed:
+        log(f"  {failed} products could not be changed this run; the next run retries them", 'WARNING')
     if gone or hold:
         log(f"✓ Archived {len(result['archived'])} products (with 301 redirects); "
             f"held {len(result['drafted'])} as drafts")

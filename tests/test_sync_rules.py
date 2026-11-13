@@ -228,6 +228,36 @@ class Retire(SyncTestCase):
         self.assertEqual(self.calls.redirects, [])
         self.assertEqual(len(result['drafted']), 1)
 
+    def test_one_failed_request_does_not_stop_the_pass(self):
+        import requests
+        calls = self.calls
+
+        def flaky(query, variables=None, use_rate_limit=True):
+            if 'productUpdate' in query and variables['product']['id'].endswith('/B'):
+                raise requests.exceptions.HTTPError('404 Client Error')
+            return calls(query, variables, use_rate_limit)
+        sync.graphql_request = flaky
+        store = {k: existing(k, 'DRAFT') for k in ('A', 'B', 'C')}
+        result = self.run_retire(store, [])
+        self.assertEqual([r['sku'] for r in result['archived']], ['A', 'C'])
+
+    def test_existing_redirect_counts_as_done(self):
+        sync.graphql_request = lambda *a, **k: {'data': {'urlRedirectCreate': {'userErrors': [
+            {'field': ['urlRedirect', 'path'], 'message': 'Path has already been taken'}]}}}
+        self.assertTrue(sync.create_url_redirect('/products/x', '/collections/y'))
+
+    def test_transient_http_error_is_retried(self):
+        import types
+        answers = [types.SimpleNamespace(status_code=404, headers={'Retry-After': '0'}),
+                   types.SimpleNamespace(status_code=200, headers={}, raise_for_status=lambda: None,
+                                         json=lambda: {'data': {'ok': True}})]
+        real_post, sync.requests.post = sync.requests.post, lambda *a, **k: answers.pop(0)
+        sync.graphql_request = self._saved['graphql_request']
+        try:
+            self.assertEqual(sync.graphql_request('query { x }', use_rate_limit=False)['data'], {'ok': True})
+        finally:
+            sync.requests.post = real_post
+
     def test_other_suppliers_products_are_left_alone(self):
         store = {'HIB': existing('HIB', tags=['hibbert']), 'MAN': existing('MAN', tags=['sync:ignore'])}
         self.run_retire(store, [])
