@@ -9,8 +9,18 @@ Stateless, CI-compatible, fully idempotent.
 v3.0 CHANGES:
   - Brand collections (vendor-rule smart collections, min 5 products)
   - SEO title/description set on every created collection
-  - Existing collections with missing/thin descriptions get backfilled
-    (manually written collection descriptions are never touched)
+
+v3.1 CHANGES (2026-11):
+  - An EXISTING collection's description and SEO are never written. All of
+    them were rewritten by hand in Nov 2026; the old "backfill missing or
+    thin descriptions" step is gone. Generated text is used only at the
+    moment the sync creates a new collection.
+  - Merges live in category_map_v4.json: a category can point at a
+    collection with a different handle (collection_handle), a brand can be
+    folded into another (settings.brands.merge), and handles listed in
+    settings.collections.never_publish are never published or edited.
+  - A category with an explicit collection_title has its collection renamed
+    to match (Gloves -> "Gloves & Safety").
 
 Environment Variables:
     SHOPIFY_STORE: Store URL (e.g., kingsway-janitorial.myshopify.com)
@@ -50,9 +60,9 @@ RATE_LIMIT_DELAY = 0.5
 # A vendor needs at least this many products to get a brand collection
 BRAND_MIN_PRODUCTS = 5
 
-# Existing collections with fewer text characters than this get a generated
-# description (anything longer is assumed to be hand-written and is kept)
-MIN_COLLECTION_DESCRIPTION = 40
+# Filled from category_map_v4.json by load_category_map()
+NEVER_PUBLISH: set = set()       # collection handles the sync leaves alone
+MERGED_BRANDS: Dict[str, str] = {}   # vendor -> the brand it was merged into
 
 
 def log(msg: str):
@@ -104,6 +114,9 @@ def load_category_map() -> List[Dict]:
         with open(CATEGORY_MAP_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             categories = data.get('categories', [])
+            settings = data.get('settings', {})
+            NEVER_PUBLISH.update(settings.get('collections', {}).get('never_publish', []))
+            MERGED_BRANDS.update(settings.get('brands', {}).get('merge', {}))
             
             # Filter out fallback categories (priority <= 10) unless the map
             # asks for a collection anyway: General Parts has no keywords but
@@ -337,9 +350,9 @@ def create_automated_collection(
         return None
 
 
-def update_collection_content(collection_gid: str, description: str, seo: Dict) -> bool:
-    """Backfill description + SEO on an existing collection (used only when
-    the current description is missing/thin — manual copy is never replaced)."""
+def rename_collection(collection_gid: str, title: str) -> bool:
+    """Set an existing collection's title (nothing else: its description and
+    SEO are hand-written and stay as they are)."""
     mutation = '''
     mutation collectionUpdate($input: CollectionInput!) {
       collectionUpdate(input: $input) {
@@ -351,8 +364,7 @@ def update_collection_content(collection_gid: str, description: str, seo: Dict) 
     variables = {
         "input": {
             "id": collection_gid,
-            "descriptionHtml": description,
-            "seo": seo
+            "title": title
         }
     }
     try:
@@ -475,12 +487,13 @@ def publish_collection(collection_gid: str) -> bool:
 
 
 def sync_collections(specs: List[Dict]) -> Dict[str, int]:
-    """Create (or content-backfill) one collection per spec.
+    """Create one collection per spec that does not exist yet.
 
-    spec = {title, handle, condition, rule_column, count, min_products, kind}
+    spec = {title, handle, condition, rule_column, count, min_products, kind,
+            rename}. An existing collection keeps its description and SEO.
     """
     stats = {'created': 0, 'updated': 0, 'skipped_exists': 0,
-             'skipped_threshold': 0, 'failed': 0}
+             'skipped_threshold': 0, 'skipped_retired': 0, 'failed': 0}
 
     for spec in specs:
         title = spec['title']
@@ -490,6 +503,11 @@ def sync_collections(specs: List[Dict]) -> Dict[str, int]:
         log(f"📦 {spec['condition']}")
         log(f"   Handle: {handle}")
         log(f"   Products: {spec['count']} (min: {spec['min_products']})")
+
+        if handle in NEVER_PUBLISH:
+            log(f"   ⏭️  Skipped (listed in never_publish)")
+            stats['skipped_retired'] += 1
+            continue
 
         # Skip if below threshold
         if spec['count'] < spec['min_products']:
@@ -506,15 +524,14 @@ def sync_collections(specs: List[Dict]) -> Dict[str, int]:
         existing = collection_exists_by_handle(handle)
         if existing:
             count = existing.get('productsCount', 0)
-            # Backfill description + SEO when missing/thin; never replace
-            # a hand-written description.
-            existing_desc = strip_html(existing.get('descriptionHtml', ''))
-            existing_seo = (existing.get('seo') or {}).get('description') or ''
-            if len(existing_desc) < MIN_COLLECTION_DESCRIPTION or not existing_seo:
-                log(f"   ✏️  Exists ({count} products) — backfilling description/SEO...")
-                if update_collection_content(existing['id'], description, seo):
+            # Description and SEO are never touched on an existing collection
+            # (all hand-written). Only the title follows the category map,
+            # and only where the map sets collection_title explicitly.
+            if spec.get('rename') and existing.get('title') != title:
+                log(f"   ✏️  Exists ({count} products) — renaming "
+                    f"'{existing.get('title')}' to '{title}'...")
+                if rename_collection(existing['id'], title):
                     stats['updated'] += 1
-                    log(f"   ✅ Updated")
                 else:
                     stats['failed'] += 1
             else:
@@ -572,7 +589,9 @@ def build_specs(categories: List[Dict], type_counts: Dict[str, int],
         specs.append({
             'kind': 'category',
             'title': category.get('collection_title') or category.get('title', product_type.split(' > ')[-1]),
-            'handle': category['handle'],
+            # the collection can live under a different handle than the tag
+            'handle': category.get('collection_handle') or category['handle'],
+            'rename': bool(category.get('collection_title')),
             'condition': product_type,
             'rule_column': 'TYPE',
             'count': type_counts.get(product_type, 0),
@@ -580,6 +599,8 @@ def build_specs(categories: List[Dict], type_counts: Dict[str, int],
         })
 
     for vendor, count in sorted(vendor_counts.items(), key=lambda kv: -kv[1]):
+        if vendor in MERGED_BRANDS:
+            continue    # merged into another brand: its collection is not recreated
         specs.append({
             'kind': 'brand',
             'title': vendor,
@@ -594,7 +615,7 @@ def build_specs(categories: List[Dict], type_counts: Dict[str, int],
 
 def main():
     log("=" * 70)
-    log("JohnnyVac Automated Collection Creator v2.1")
+    log("JohnnyVac Automated Collection Creator v3.1")
     log("=" * 70)
     log("")
     
@@ -659,9 +680,10 @@ def main():
     log("SUMMARY")
     log("=" * 70)
     log(f"✅ Created:             {stats['created']}")
-    log(f"✏️  Content backfilled:  {stats['updated']}")
+    log(f"✏️  Renamed:             {stats['updated']}")
     log(f"⏭️  Skipped (exists):    {stats['skipped_exists']}")
     log(f"⏭️  Skipped (threshold): {stats['skipped_threshold']}")
+    log(f"⏭️  Skipped (never_publish): {stats['skipped_retired']}")
     log(f"❌ Failed:              {stats['failed']}")
     log(f"📊 Total specs:         {len(specs)}")
     log("=" * 70)

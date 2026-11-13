@@ -1,7 +1,7 @@
 {
   "settings": {
-    "version": "4.3",
-    "description": "Category map v4.3 — Added missing keywords from needs_review analysis, encoding-safe skip patterns",
+    "version": "4.4",
+    "description": "Category map v4.4 — collection merges (Gloves & Safety, HEPA into Commercial Vacuums, Riccar into Simplicity), never-sell rules, brand settings",
     "notes": [
       "1. First try to map using JohnnyVac's ProductCategory field (jv_category_mappings)",
       "2. If JV category is generic (All Parts, Johnny Vac Parts), use keyword matching",
@@ -13,10 +13,14 @@
       "8. v4.2: Lowered Safety & PPE min_products from 2 to 1",
       "9. v4.3: Added ~15 missing keywords: joint, noise suppression, control module, spacer, hex, strainer, powerhead, label, etc.",
       "10. v4.3: Added encoding-tolerant French skip patterns for mojibake edge cases",
-      "11. v4.3: Added label/sticker/decal to global_part_keywords"
+      "11. v4.3: Added label/sticker/decal to global_part_keywords",
+      "12. v4.4: Safety & PPE merged into Gloves (collection renamed 'Gloves & Safety'); HEPA Vacuums merged into Commercial Vacuums. The old handles are listed in collections.retired_handles so their tags are cleaned up and their redirects point at the surviving collection.",
+      "13. v4.4: brands.merge folds one brand into another (Riccar -> Simplicity) so the merged brand collection is not recreated.",
+      "14. v4.4: the Filters category uses the live 'filters-filtration' collection (collection_handle); 'parts-filters' (UNUSED - Filters & Filtration) is in collections.never_publish. The product tag stays 'parts-filters'.",
+      "15. v4.4: skip_patterns gained used / shipping-box rules. Skipped rows are never created or activated; an existing product for one is held as a draft."
     ],
     "skip_patterns": {
-      "description": "Products matching these patterns should be skipped entirely",
+      "description": "Feed rows matching these are never created or activated ($0 price, placeholders, used items, JV promo merch and shipping boxes). A product that already exists for one is held in DRAFT.",
       "title_patterns_en": [
         "this part is rarely ordered",
         "price will be adjusted",
@@ -42,7 +46,12 @@
         "Promotional products",
         "Johnny Vac Clearance & Overstock Products"
       ],
-      "max_price_threshold": 0.05
+      "max_price_threshold": 0.05,
+      "title_regex": [
+        "^\\W*(?:slightly\\s+)?used\\b(?!\\s+(?:with|for|on|in|to|as)\\b)",
+        "\\bused\\s*:",
+        "^\\W*box\\s+(?:for\\s+central\\s+vacuum\\s+kit\\b|\\d+\\s*x\\s*\\d+)"
+      ]
     },
     "global_part_keywords": [
       "pump",
@@ -148,7 +157,24 @@
       "control",
       "module",
       "head"
-    ]
+    ],
+    "brands": {
+      "description": "Vendor = brand, never the supplier. 'merge' folds one brand into another so the merged brand collection is not recreated. 'fallback_vendor' is used when a title names no brand at all.",
+      "fallback_vendor": "JohnnyVac",
+      "merge": {
+        "Riccar": "Simplicity"
+      }
+    },
+    "collections": {
+      "description": "retired_handles: old category handle -> the category that replaced it (the old tag is removed from products; archive redirects use the replacement). never_publish: collection handles the sync must not publish or edit.",
+      "retired_handles": {
+        "ops-safety-ppe": "ops-gloves",
+        "equipment-hepa-vacuums": "equipment-commercial-vacuums"
+      },
+      "never_publish": [
+        "parts-filters"
+      ]
+    }
   },
   "jv_category_mappings": {
     "_description": "Maps JohnnyVac ProductCategory values to Shopify productType. null = use keyword matching",
@@ -468,8 +494,8 @@
       "confidence": "high"
     },
     "HEPA Specialized Vacuums": {
-      "productType": "Equipment & Machines > HEPA Vacuums",
-      "handle": "equipment-hepa-vacuums",
+      "productType": "Equipment & Machines > Commercial Vacuums",
+      "handle": "equipment-commercial-vacuums",
       "confidence": "high"
     },
     "Residential Vacuums": {
@@ -680,7 +706,8 @@
       "exclusions_fr": [
         "sac hepa"
       ],
-      "min_products": 1
+      "min_products": 1,
+      "collection_handle": "filters-filtration"
     },
     {
       "productType": "Parts & Replacement Parts > Vacuum Bags",
@@ -1526,59 +1553,6 @@
       "min_products": 1
     },
     {
-      "productType": "Equipment & Machines > HEPA Vacuums",
-      "handle": "equipment-hepa-vacuums",
-      "title": "HEPA Specialized Vacuums",
-      "priority": 55,
-      "keywords_en": [
-        "hepa vacuum",
-        "hepa certified vacuum"
-      ],
-      "keywords_fr": [
-        "aspirateur hepa"
-      ],
-      "exclusions_en": [
-        "filter",
-        "bag",
-        "belt",
-        "hose",
-        "motor",
-        "assembly",
-        "assy",
-        "repair kit",
-        "cord",
-        "plug",
-        "pigtail",
-        "pcb",
-        "circuit",
-        "relay",
-        "adapter",
-        "coupling",
-        "for use with",
-        "replacement",
-        "part",
-        "brush roll",
-        "nozzle",
-        "wand",
-        "pack of"
-      ],
-      "exclusions_fr": [
-        "filtre",
-        "sac",
-        "courroie",
-        "boyau",
-        "moteur",
-        "assemblage",
-        "kit",
-        "cordon",
-        "prise",
-        "remplacement",
-        "pièce",
-        "paquet de"
-      ],
-      "min_products": 1
-    },
-    {
       "productType": "Equipment & Machines > Commercial Vacuums",
       "handle": "equipment-commercial-vacuums",
       "title": "Commercial Vacuums",
@@ -1586,10 +1560,13 @@
       "keywords_en": [
         "commercial vacuum",
         "vacuum cleaner",
-        "stick vacuum"
+        "stick vacuum",
+        "hepa vacuum",
+        "hepa certified vacuum"
       ],
       "keywords_fr": [
-        "aspirateur commercial"
+        "aspirateur commercial",
+        "aspirateur hepa"
       ],
       "exclusions_en": [
         "filter",
@@ -1810,7 +1787,7 @@
     {
       "productType": "Ops & Safety > Gloves",
       "handle": "ops-gloves",
-      "title": "Gloves",
+      "title": "Gloves & Safety",
       "priority": 60,
       "keywords_en": [
         "glove",
@@ -1818,21 +1795,7 @@
         "latex",
         "vinyl",
         "disposable glove",
-        "work glove"
-      ],
-      "keywords_fr": [
-        "gant"
-      ],
-      "exclusions_en": [],
-      "exclusions_fr": [],
-      "min_products": 2
-    },
-    {
-      "productType": "Ops & Safety > Safety & PPE",
-      "handle": "ops-safety-ppe",
-      "title": "Safety & PPE",
-      "priority": 60,
-      "keywords_en": [
+        "work glove",
         "mask",
         "respirator",
         "safety glasses",
@@ -1848,13 +1811,15 @@
         "n95"
       ],
       "keywords_fr": [
+        "gant",
         "masque",
         "protection",
         "lunettes"
       ],
       "exclusions_en": [],
       "exclusions_fr": [],
-      "min_products": 1
+      "min_products": 1,
+      "collection_title": "Gloves & Safety"
     },
     {
       "productType": "Parts & Replacement Parts > General Parts",

@@ -30,7 +30,7 @@ from typing import Dict, List
 
 from product_content import (
     adapt_metafields_to_definitions,
-    extract_brand, extract_compatible_models, extract_dimensions,
+    extract_brand, extract_dimensions,
     extract_material, extract_pack_quantity,
 )
 from shopify_auth import get_access_token
@@ -105,7 +105,9 @@ def desired_metafields(product_id: str, title: str, product_type: str, sku: str)
     add('brand', extract_brand(title))
     add('pack_quantity', extract_pack_quantity(title), 'number_integer')
     add('material', extract_material(title))
-    add('compatible_models', ', '.join(extract_compatible_models(title, product_type)))
+    # custom.compatible_models is deliberately NOT written here: this script
+    # replaces values, and that list is merged, never replaced (hand-entered
+    # models feed the part finder). The daily sync maintains it.
     specs = extract_dimensions(title)
     add('size_inches', specs.get('size_inches'))
     add('voltage', specs.get('voltage'))

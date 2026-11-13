@@ -24,15 +24,20 @@ on:
         type: boolean
         default: false
       archive_missing:
-        description: 'Archive products missing from CSV (set to DRAFT)'
+        description: 'Archive products that left the feed (ARCHIVED + 301 redirect)'
         required: false
         type: boolean
         default: true
       archive_cap:
-        description: 'Most live products one run may draft; over this the run drafts nothing and fails'
+        description: 'Most LIVE products one run may take off the storefront; over this the run archives nothing and fails'
         required: false
         type: number
         default: 50
+      model_ai_cap:
+        description: 'Most parts the AI model back-fill may look at this run (0 = rules only)'
+        required: false
+        type: number
+        default: 500
 
 # A manual run queues behind the scheduled one instead of racing it.
 concurrency:
@@ -58,6 +63,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests anthropic
 
+      - name: Unit tests (sync rules)
+        run: python -m unittest discover -s tests
+
       - name: Validate configuration files
         run: |
           echo "Validating category_map_v4.json..."
@@ -75,6 +83,13 @@ jobs:
               
               print(f"✅ Loaded {len(data['categories'])} categories")
               print(f"✅ Loaded {len(data['jv_category_mappings'])} JV category mappings")
+              handles = {c["handle"] for c in data["categories"]}
+              for jv, target in data["jv_category_mappings"].items():
+                  if isinstance(target, dict):
+                      assert target["handle"] in handles, f"'{jv}' maps to unknown category {target['handle']}"
+              for old, new in data["settings"].get("collections", {}).get("retired_handles", {}).items():
+                  assert old not in handles, f"retired handle {old} is still a category"
+                  assert new in handles, f"retired handle {old} points at unknown category {new}"
               print(f"✅ Configuration valid")
               
           except Exception as e:
@@ -94,6 +109,8 @@ jobs:
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           ARCHIVE_MISSING: ${{ github.event.inputs.archive_missing || 'true' }}
           MAX_ARCHIVE_PER_RUN: ${{ github.event.inputs.archive_cap || '50' }}
+          MODEL_AI_CAP: ${{ github.event.inputs.model_ai_cap || '500' }}
+          MODEL_BACKFILL_MODEL: ${{ vars.MODEL_BACKFILL_MODEL || 'claude-sonnet-5-5' }}
         run: |
           echo "Starting JohnnyVac product sync..."
           if [ "$DRY_RUN" = "true" ]; then
@@ -164,14 +181,14 @@ jobs:
               echo "- 🗂️ Collections: Skipped"
             fi
             if [[ "${{ secrets.ANTHROPIC_API_KEY }}" == "" ]]; then
-              echo "- 🧠 AI descriptions: ⚠️ DISABLED — add the ANTHROPIC_API_KEY repo secret to enable Claude-written descriptions (template fallback in use)"
+              echo "- 🧠 AI steps: ⚠️ SKIPPED — add the ANTHROPIC_API_KEY repo secret to enable the AI model back-fill and Claude-written descriptions (rules and templates only for now)"
             else
-              echo "- 🧠 AI descriptions: enabled"
+              echo "- 🧠 AI steps (model back-fill, descriptions): enabled"
             fi
             echo ""
             echo "### Reports"
-            echo "- 📄 needs_review.csv: Products that couldn't be auto-categorized"
-            echo "- 📄 skipped_products.csv: Placeholder products that were skipped"
+            echo "- 📄 needs_review.csv: Products that couldn't be auto-categorized, plus every model the back-fill found (models:rule / models:ai)"
+            echo "- 📄 skipped_products.csv: Feed rows the never-sell rules exclude"
             echo ""
             echo "### Timestamp"
             echo "- ⏰ UTC: $(date -u)"
