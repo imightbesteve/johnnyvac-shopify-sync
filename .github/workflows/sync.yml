@@ -110,6 +110,7 @@ jobs:
           ARCHIVE_MISSING: ${{ github.event.inputs.archive_missing || 'true' }}
           MAX_ARCHIVE_PER_RUN: ${{ github.event.inputs.archive_cap || '50' }}
           MODEL_AI_CAP: ${{ github.event.inputs.model_ai_cap || '500' }}
+          MODEL_BACKFILL_MODEL: ${{ vars.MODEL_BACKFILL_MODEL || 'claude-sonnet-5-5' }}
         run: |
           echo "Starting JohnnyVac product sync..."
           if [ "$DRY_RUN" = "true" ]; then

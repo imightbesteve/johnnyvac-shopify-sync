@@ -203,6 +203,7 @@ class AiPass(unittest.TestCase):
         self.assertEqual(out['X2'], {'models': ['4122'], 'confidence': 'low'})
         self.assertEqual(out['X3'], {'models': [], 'confidence': 'high'})
         self.assertEqual(seen[0]['output_config']['format']['type'], 'json_schema')
+        self.assertEqual(seen[0]['model'], 'claude-sonnet-5-5')
 
 
 class Retire(SyncTestCase):

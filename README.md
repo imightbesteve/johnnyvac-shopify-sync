@@ -25,7 +25,9 @@ metadata, SEO, and product descriptions.
 | `SHOPIFY_ACCESS_TOKEN` | fallback | Static `shpat_…` token, only used when client credentials aren't set. Beware: static tokens keep their original scopes forever. |
 | `ANTHROPIC_API_KEY` | ⚠️ recommended | Enables the AI steps: the model back-fill's AI pass and Claude-written product descriptions. **Currently missing** — without it the back-fill runs its rule pass only, descriptions fall back to templates and the weekly description run skips itself. |
 
-Optional repo *variable*: `ANTHROPIC_MODEL` (defaults to `claude-opus-4-8`).
+Optional repo *variables*: `ANTHROPIC_MODEL` (product descriptions, defaults to
+`claude-opus-4-8`) and `MODEL_BACKFILL_MODEL` (the model back-fill's AI pass,
+defaults to `claude-sonnet-5-5`).
 
 ## Required Shopify app access scopes
 

@@ -33,6 +33,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Iterable, List, Optional, Set
 
 MAX_MODELS = 128            # Shopify's limit for a list metafield
+# Claude model for the AI pass. Its own setting, separate from the one that
+# writes product descriptions (ANTHROPIC_MODEL).
+AI_MODEL = os.environ.get('MODEL_BACKFILL_MODEL') or 'claude-sonnet-5-5'
 TAG_RULE = 'models:rule'
 TAG_AI = 'models:ai'
 TAG_AI_LOW = 'models:ai-low'    # AI was unsure: listed for review, not written
@@ -210,7 +213,7 @@ def ai_models(items: List[Dict], model: Optional[str] = None, workers: int = 4,
         return {}
 
     client = anthropic.Anthropic()
-    model = model or os.environ.get('ANTHROPIC_MODEL', 'claude-opus-4-8')
+    model = model or AI_MODEL
     stop = {'reason': None}
 
     def one(item: Dict) -> Optional[Dict]:
@@ -226,7 +229,9 @@ def ai_models(items: List[Dict], model: Optional[str] = None, workers: int = 4,
                 max_tokens=4000,
                 system=AI_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user}],
-                output_config={"format": {"type": "json_schema", "schema": AI_SCHEMA}},
+                # reading a title for model numbers is a simple job: low effort
+                output_config={"effort": "low",
+                               "format": {"type": "json_schema", "schema": AI_SCHEMA}},
             )
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError,
                 anthropic.NotFoundError, anthropic.BadRequestError) as e:
