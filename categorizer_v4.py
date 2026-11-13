@@ -90,6 +90,11 @@ class ProductCategorizer:
             if has_phrase(pattern):
                 return True, f"Matched skip pattern (FR): '{pattern}'"
         
+        # Regex rules on the raw titles: used items, shipping boxes.
+        for pattern in self.skip_patterns.get('title_regex', []):
+            if any(re.search(pattern, t, re.IGNORECASE) for t in (title_en, title_fr) if t):
+                return True, f"Matched never-sell rule: '{pattern}'"
+
         return False, None
 
     # =========================================================================

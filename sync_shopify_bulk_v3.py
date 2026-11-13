@@ -29,6 +29,19 @@ CHANGES from v3.4:
   page (fixes the GSC "Not found (404)" errors).
 - productUpdate migrated from the deprecated `input` argument to `product`
   (ProductUpdateInput) for API 2026-01.
+
+v4.1 (2026-11):
+- Products that leave the feed are ARCHIVED (not drafted), tagged
+  sync:discontinued and 301-redirected to their collection. Drafts whose SKU
+  is no longer in the feed are archived the same way (the backlog).
+- Feed rows the never-sell rules exclude ($0 price, placeholders, used items,
+  JV promo merch / shipping boxes) are held in DRAFT, never archived or
+  activated.
+- One stock rule (see desired_status): a product goes live the first time it
+  has stock and is never activated at zero stock.
+- custom.compatible_models is merged with what is stored, never replaced.
+- Model back-fill for parts with no models (rules, then AI) -- model_backfill.py.
+- Vendor / custom.brand = the machine brand (product_content.extract_brand).
 """
 
 import os
@@ -47,6 +60,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from categorizer_v4 import ProductCategorizer
 from title_cleaner import clean_title
 from fitment import build_fitment
+from model_backfill import (
+    MODEL_TAG_PREFIX, TAG_AI, TAG_AI_LOW, TAG_NONE, TAG_RULE, ai_models,
+    build_known_index, merge_models, model_key, own_identifiers, rule_models,
+)
 from product_content import (
     adapt_metafields_to_definitions, ai_available, build_description,
     compute_vendor, extract_brand, extract_compatible_models,
@@ -70,16 +87,40 @@ IMAGE_BASE_URL = 'https://www.johnnyvacstock.com/photos/web/'
 LANGUAGE = 'en'
 DRY_RUN = os.environ.get('DRY_RUN', 'false').lower() == 'true'
 ARCHIVE_MISSING = os.environ.get('ARCHIVE_MISSING', 'true').lower() == 'true'
-# Most live products one run may draft. A feed that comes back short makes
-# every absent SKU look delisted; past this many the run drafts nothing and
-# fails instead, so the failure email is the alert.
 SEO_MANUAL_TAG = 'seo:manual'
+# Most LIVE products one run may take off the storefront. A feed that comes
+# back short makes every absent SKU look delisted; past this many the run
+# retires nothing and fails instead, so the failure email is the alert.
 MAX_ARCHIVE_PER_RUN = int(os.environ.get('MAX_ARCHIVE_PER_RUN', '50'))
+# A feed with fewer SKUs than this is treated as truncated: nothing is
+# archived from it (the real feed carries about 6,900).
+FEED_MIN_SKUS = int(os.environ.get('FEED_MIN_SKUS', '5000'))
 
-# Out-of-stock products stay ACTIVE and show as "Sold out" instead of being
-# unpublished to DRAFT (which 404s the URL and churns Google's index every
-# time stock flips). Set KEEP_OOS_ACTIVE=false to restore the old behavior.
+# Set on a product when the sync archives it for leaving the feed. It is how
+# the sync tells its own archive apart from a manual one: only a product
+# carrying it is brought back if the SKU returns to the feed.
+DISCONTINUED_TAG = 'sync:discontinued'
+# Products carrying one of these tags belong to another supplier (or are
+# hand-managed) and are never drafted or archived for being absent from the
+# JohnnyVac feed. Supplier routing is by tag, never by vendor.
+PROTECTED_TAGS = {t.strip().lower() for t in
+                  os.environ.get('SYNC_PROTECTED_TAGS', 'hibbert,sync:ignore').split(',') if t.strip()}
+
+# THE STOCK RULE (one rule, applied on every run -- see desired_status):
+#   - stock > 0                     -> ACTIVE
+#   - stock = 0, already ACTIVE     -> stays ACTIVE and shows "Sold out"
+#                                      (inventory tracked, "continue selling"
+#                                      off, so it cannot be bought)
+#   - stock = 0, not yet ACTIVE     -> DRAFT until stock arrives
+# A zero-stock item is therefore never activated and never sellable, and a
+# page that is already indexed does not 404 each time stock runs out (about
+# 3,000 feed items sit at zero on any given day).
+# KEEP_OOS_ACTIVE=false switches to the stricter rule: zero stock -> DRAFT.
 KEEP_OOS_ACTIVE = os.environ.get('KEEP_OOS_ACTIVE', 'true').lower() == 'true'
+
+# Most parts the AI model back-fill may look at per run.
+MODEL_AI_CAP = int(os.environ.get('MODEL_AI_CAP', '500'))
+PARTS_TYPE_PREFIX = 'Parts & Replacement Parts'
 
 # Description shorter than this (text chars) counts as "thin" and gets enriched
 MIN_DESCRIPTION_LENGTH = 80
@@ -104,6 +145,12 @@ MAX_POLL_TIME = 3600  # 1 hour max per bulk operation
 
 # Tags the sync owns (everything else on a product is preserved)
 MANAGED_TAG_PREFIXES = ('confidence:', 'source:')
+# Category handles that were merged away (old -> replacement), from
+# settings.collections.retired_handles. Their tags are removed from products.
+RETIRED_HANDLES: Dict[str, str] = {}
+# Category handle -> the handle of the collection that shows it, where the two
+# differ (Filters: tag parts-filters, collection filters-filtration).
+COLLECTION_HANDLES: Dict[str, str] = {}
 
 # =============================================================================
 # LOGGING
@@ -224,11 +271,22 @@ def get_metafield_definition_types() -> Dict[str, str]:
     return _metafield_def_types
 
 def fitment_models(desired: Dict) -> List[str]:
-    """Machine models a part fits: the feed's fitment links and model numbers
-    in the title (see fitment.py), then the brand-model patterns the title
-    extractor finds (EL5010, AH10165)."""
+    """Machine models the sync itself finds for a part: the feed's fitment
+    links and model numbers in the title (see fitment.py), the brand-model
+    patterns the title extractor finds (EL5010), then the back-fill's. The
+    part's own SKU / part number is never a model."""
     extracted = extract_compatible_models(desired.get('title', ''), desired.get('product_type', ''))
-    return list(dict.fromkeys(desired.get('fits_models', []) + extracted))[:12]
+    own = own_identifiers(desired.get('sku', ''), desired.get('title', ''),
+                          extra=[desired.get('upc') or ''])
+    found = desired.get('fits_models', []) + extracted + desired.get('backfill_models', [])
+    return [m for m in dict.fromkeys(found) if model_key(m) not in own][:12]
+
+
+def final_models(desired: Dict) -> List[str]:
+    """What custom.compatible_models should hold: everything already stored
+    (hand-entered values included) plus the models the sync found that are
+    not there yet. Never shorter than the stored list."""
+    return merge_models(desired.get('stored_models', []), fitment_models(desired))
 
 
 def build_metafields(desired: Dict) -> List[Dict]:
@@ -250,7 +308,13 @@ def build_metafields(desired: Dict) -> List[Dict]:
     add('brand', extract_brand(title))
     add('pack_quantity', extract_pack_quantity(title), 'number_integer')
     add('material', extract_material(title))
-    add('compatible_models', ', '.join(fitment_models(desired)))
+    models = final_models(desired)
+    # Written only when it adds to what is stored: an unchanged or empty list
+    # is left out of the write entirely, so it cannot wipe the stored one.
+    if models and models != desired.get('stored_models', []):
+        metafields.append({"namespace": "custom", "key": "compatible_models",
+                           "type": "list.single_line_text_field",
+                           "value": json.dumps(models, separators=(',', ':'))})
     if desired.get('part_gids'):
         metafields.append({"namespace": "custom", "key": "compatible_parts",
                            "type": "list.product_reference",
@@ -260,13 +324,31 @@ def build_metafields(desired: Dict) -> List[Dict]:
     add('voltage', specs.get('voltage'))
     return adapt_metafields_to_definitions(metafields, get_metafield_definition_types())
 
-def merge_tags(existing_tags: List[str], managed_tags: List[str], known_handles: Set[str]) -> List[str]:
-    """Replace only the tags this sync owns; preserve everything added manually."""
+def merge_tags(existing_tags: List[str], managed_tags: List[str], known_handles: Set[str],
+               model_tag: Optional[str] = None) -> List[str]:
+    """Replace only the tags this sync owns; preserve everything added manually.
+
+    Owned: the category handle (current and retired ones), confidence:*,
+    source:*, and sync:discontinued (a product in the feed is not
+    discontinued). A models:* tag is kept as it is unless this run sets a new
+    one (model_tag)."""
     preserved = [
         t for t in (existing_tags or [])
         if not t.startswith(MANAGED_TAG_PREFIXES) and t not in known_handles
+        and t not in RETIRED_HANDLES and t != DISCONTINUED_TAG
+        and not (model_tag and t.startswith(MODEL_TAG_PREFIX))
     ]
-    return sorted(set(preserved) | set(managed_tags))
+    return sorted(set(preserved) | set(managed_tags) | ({model_tag} if model_tag else set()))
+
+
+def desired_status(inventory: int, existing_status: Optional[str]) -> str:
+    """The stock rule (see KEEP_OOS_ACTIVE above). existing_status is None for
+    a product that does not exist yet."""
+    if inventory > 0:
+        return 'ACTIVE'
+    if KEEP_OOS_ACTIVE and existing_status == 'ACTIVE':
+        return 'ACTIVE'      # sold out, page stays up, cannot be bought
+    return 'DRAFT'           # never activate a zero-stock item
 
 # =============================================================================
 # DESIRED STATE (per CSV product)
@@ -291,9 +373,9 @@ def build_desired_state(product: Dict) -> Dict:
         'jv_desc_is_rich': len(strip_html(jv_desc)) >= MIN_DESCRIPTION_LENGTH,
         'price': normalize_price(product.get('RegularPrice', '0.00')),
         'inventory': inventory,
-        # inventoryPolicy DENY already prevents overselling; keeping the page
-        # ACTIVE preserves its Google indexing while it shows "Sold out"
-        'status': 'ACTIVE' if (KEEP_OOS_ACTIVE or inventory > 0) else 'DRAFT',
+        # as for a product that does not exist yet; calculate_delta applies
+        # the stock rule again once it knows the product's current status
+        'status': desired_status(inventory, None),
         'product_type': category_info.get('product_type', 'Other > Needs Review'),
         'vendor': compute_vendor(title),
         'category_gid': taxonomy_for_handle(handle_tag),
@@ -306,6 +388,8 @@ def build_desired_state(product: Dict) -> Dict:
         'upc': product.get('upc', '') or None,
         'seo_title': generate_seo_title(title, sku),
         'fits_models': product.get('_fits', []),
+        'backfill_models': product.get('_backfill_models', []),
+        'stored_models': [],
         'part_skus': product.get('_part_skus', []),
         'seo_description': generate_seo_description(title, sku, jv_desc),
     }
@@ -355,9 +439,9 @@ def fetch_csv_data() -> Tuple[List[Dict], List[str]]:
         # The feed lists some SKUs twice: once under a real category and once
         # under Clearance/Promotional. Those are real products that happen to
         # be on clearance, but first-row-wins kept whichever came first, and
-        # when that was the clearance row the categorizer skipped the SKU,
-        # calculate_delta counted it missing, and archive_missing_products
-        # drafted the live product. Prefer the row the categorizer will keep.
+        # when that was the clearance row the categorizer skipped the SKU and
+        # the sync drafted the live product. Prefer the row the categorizer
+        # will keep.
         if (prev.get('ProductCategory') in skipped_categories
                 and cleaned_row.get('ProductCategory') not in skipped_categories):
             by_sku[sku] = cleaned_row
@@ -455,8 +539,10 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
                       sku
                       price
                       inventoryQuantity
+                      inventoryPolicy
                       inventoryItem {
                         id
+                        tracked
                       }
                     }
                   }
@@ -572,6 +658,19 @@ def _existing_from_product_node(obj: Dict) -> Dict:
     }
 
 
+def _variant_fields(variant: Dict) -> Dict:
+    item = variant.get('inventoryItem') or {}
+    return {
+        'inventory_item_id': item.get('id', ''),
+        'price': variant.get('price', '0'),
+        'inventory': variant.get('inventoryQuantity', 0),
+        # "continue selling when out of stock" off + tracked is what makes a
+        # sold-out product unbuyable; both are checked on every run
+        'sellable_at_zero': (variant.get('inventoryPolicy') not in (None, 'DENY')
+                             or item.get('tracked') is False),
+    }
+
+
 def _json_list(value: Optional[str]) -> List[str]:
     try:
         parsed = json.loads(value) if value else []
@@ -584,6 +683,10 @@ def _json_list(value: Optional[str]) -> List[str]:
 # as absent from Shopify -- creating it again would rebuild the duplicate this
 # store just spent a cleanup removing.
 ARCHIVED_ONLY_SKUS: Set[str] = set()
+# SKU -> record of a product the SYNC archived (it carries sync:discontinued)
+# and that has no live or draft copy. If the SKU comes back into the feed the
+# product is restored instead of being left archived or created again.
+ARCHIVED_BY_SYNC: Dict[str, Dict] = {}
 
 
 def _register_existing(products: Dict[str, Dict], sku: str, record: Dict) -> None:
@@ -602,9 +705,13 @@ def _register_existing(products: Dict[str, Dict], sku: str, record: Dict) -> Non
     """
     if record.get('status') == 'ARCHIVED':
         if sku not in products:
-            ARCHIVED_ONLY_SKUS.add(sku)
+            if DISCONTINUED_TAG in (record.get('tags') or []):
+                ARCHIVED_BY_SYNC.setdefault(sku, record)
+            else:
+                ARCHIVED_ONLY_SKUS.add(sku)
         return
     ARCHIVED_ONLY_SKUS.discard(sku)
+    ARCHIVED_BY_SYNC.pop(sku, None)
     prev = products.get(sku)
     if prev is not None and prev.get('status') == 'ACTIVE' and record.get('status') != 'ACTIVE':
         return
@@ -615,6 +722,7 @@ def download_bulk_results(url: str) -> Dict[str, Dict]:
     """Download and parse bulk query results"""
     log("Downloading bulk results...")
     ARCHIVED_ONLY_SKUS.clear()
+    ARCHIVED_BY_SYNC.clear()
 
     response = requests.get(url, timeout=120)
     response.raise_for_status()
@@ -637,9 +745,7 @@ def download_bulk_results(url: str) -> Dict[str, Dict]:
                 _register_existing(products, sku, {
                     **current_product,
                     'variant_id': obj['id'],
-                    'inventory_item_id': (obj.get('inventoryItem') or {}).get('id', ''),
-                    'price': obj.get('price', '0'),
-                    'inventory': obj.get('inventoryQuantity', 0)
+                    **_variant_fields(obj),
                 })
 
     log(f"✓ Parsed {len(products)} existing products from Shopify")
@@ -702,6 +808,7 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
     """Fallback: fetch products with pagination if bulk fails"""
     log("Using paginated fetch (fallback)...")
     ARCHIVED_ONLY_SKUS.clear()
+    ARCHIVED_BY_SYNC.clear()
     products = {}
     cursor = None
     page = 0
@@ -731,7 +838,8 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                                 sku
                                 price
                                 inventoryQuantity
-                                inventoryItem { id }
+                                inventoryPolicy
+                                inventoryItem { id tracked }
                             }
                         }
                     }
@@ -760,9 +868,7 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                     _register_existing(products, sku, {
                         **base,
                         'variant_id': variant['id'],
-                        'inventory_item_id': (variant.get('inventoryItem') or {}).get('id', ''),
-                        'price': variant.get('price', '0'),
-                        'inventory': variant.get('inventoryQuantity', 0)
+                        **_variant_fields(variant),
                     })
 
         if page % 20 == 0:
@@ -779,41 +885,60 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
 # DELTA CALCULATION
 # =============================================================================
 
+def is_protected(existing: Dict) -> bool:
+    """Tagged as another supplier's (hibbert) or hand-managed (sync:ignore)."""
+    return any(t.lower() in PROTECTED_TAGS for t in existing.get('tags') or [])
+
+
 def calculate_delta(
     csv_products: List[Dict],
     existing_products: Dict[str, Dict],
     known_handles: Set[str]
-) -> Tuple[List[Dict], List[Dict], List[Dict], List[str]]:
-    """Calculate what needs to be created, updated, or archived"""
+) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    """Calculate what needs to be created or updated. (What leaves the
+    storefront is decided separately, in retire_products.)"""
 
     to_create = []
     to_update = []
     unchanged = []
-    csv_skus = set()
     skipped_archived = 0
+    held_back = 0
+    restored = 0
 
     counts = {'core': 0, 'price': 0, 'inventory': 0, 'vendor': 0, 'tags': 0,
-              'seo': 0, 'description': 0, 'category': 0, 'fitment': 0}
+              'seo': 0, 'description': 0, 'category': 0, 'fitment': 0, 'policy': 0}
 
     for product in csv_products:
         sku = product.get('SKU', '')
-        csv_skus.add(sku)
         desired = build_desired_state(product)
         desired['part_gids'] = [existing_products[s]['product_id'] for s in desired['part_skus']
                                 if (existing_products.get(s) or {}).get('status') == 'ACTIVE']
         product['_desired'] = desired
 
-        if sku not in existing_products:
+        existing = existing_products.get(sku)
+        if existing is None and sku in ARCHIVED_BY_SYNC:
+            # the sync archived it when it left the feed, and it is back
+            existing = ARCHIVED_BY_SYNC[sku]
+            restored += 1
+        if existing is None:
             if sku in ARCHIVED_ONLY_SKUS:
                 # every copy of this SKU is archived: the cleanup retired it
                 # deliberately. Recreating it would rebuild the duplicate.
                 skipped_archived += 1
                 continue
+            if desired['status'] != 'ACTIVE':
+                held_back += 1
             to_create.append(product)
             continue
 
-        existing = existing_products[sku]
-        final_tags = merge_tags(existing.get('tags', []), desired['managed_tags'], known_handles)
+        if is_protected(existing):
+            unchanged.append(product)
+            continue
+
+        desired['status'] = desired_status(desired['inventory'], existing.get('status'))
+        desired['stored_models'] = existing.get('compatible_models') or []
+        final_tags = merge_tags(existing.get('tags', []), desired['managed_tags'], known_handles,
+                                product.get('_model_tag'))
         product['_final_tags'] = final_tags
 
         flags = {
@@ -834,10 +959,13 @@ def calculate_delta(
                         and SEO_MANUAL_TAG not in (existing.get('tags') or []))),
             'description': len(existing.get('description_text', '')) < MIN_DESCRIPTION_LENGTH,
             'category': bool(desired['category_gid']) and existing.get('category_id', '') != desired['category_gid'],
-            # Only a non-empty list is written, so only a non-empty one is
-            # compared -- an emptied list would otherwise re-flag every day.
-            'fitment': (bool(fitment_models(desired)) and existing.get('compatible_models') != fitment_models(desired))
+            # Models are merged into the stored list, so this is set only when
+            # the sync has a model the product does not carry yet. A stored
+            # list is never shortened, emptied or reordered.
+            'fitment': (final_models(desired) != desired['stored_models'])
                        or (bool(desired['part_gids']) and existing.get('compatible_parts') != desired['part_gids']),
+            # a variant that could be bought with no stock
+            'policy': bool(existing.get('sellable_at_zero')),
         }
 
         if any(flags.values()):
@@ -850,20 +978,20 @@ def calculate_delta(
         else:
             unchanged.append(product)
 
-    missing_skus = [sku for sku in existing_products if sku not in csv_skus]
-
     log(f"\nDELTA SUMMARY:")
-    log(f"  To CREATE: {len(to_create)}")
+    log(f"  To CREATE: {len(to_create)}"
+        + (f" ({held_back} as drafts: no stock yet)" if held_back else ""))
     log(f"  To UPDATE: {len(to_update)}")
     for k, v in counts.items():
         if v:
             log(f"    - {k} changes: {v}")
     log(f"  UNCHANGED: {len(unchanged)} (skipping)")
-    log(f"  MISSING from feed: {len(missing_skus)}")
+    if restored:
+        log(f"  RESTORED: {restored} archived products are back in the feed")
     if skipped_archived:
         log(f"  SKIPPED (archived duplicates, not recreated): {skipped_archived}")
 
-    return to_create, to_update, unchanged, missing_skus
+    return to_create, to_update, unchanged
 
 # =============================================================================
 # DESCRIPTION GENERATION PASS (AI with template fallback)
@@ -1066,6 +1194,25 @@ mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsB
 }
 """
 
+def needs_variant_update(product: Dict) -> bool:
+    flags = product.get('_flags', {})
+    return bool(flags.get('price') or flags.get('policy'))
+
+
+def variant_update_input(product: Dict) -> Dict:
+    """ProductVariantsBulkInput: the price when it changed, and tracking with
+    "continue selling when out of stock" off when the variant could be bought
+    at zero stock."""
+    flags = product.get('_flags', {})
+    variant = {"id": product['_existing']['variant_id']}
+    if flags.get('price'):
+        variant["price"] = product['_desired']['price']
+    if flags.get('policy'):
+        variant["inventoryPolicy"] = "DENY"
+        variant["inventoryItem"] = {"tracked": True}
+    return variant
+
+
 def update_product(product_data: Dict) -> bool:
     """Update an existing product (individual fallback path)."""
     existing = product_data['_existing']
@@ -1081,10 +1228,10 @@ def update_product(product_data: Dict) -> bool:
         log(f"Update product {d['sku']} failed: {errors}", 'WARNING')
         return False
 
-    if product_data.get('_flags', {}).get('price'):
+    if needs_variant_update(product_data):
         result = graphql_request(VARIANT_PRICE_MUTATION, {
             "productId": existing['product_id'],
-            "variants": [{"id": existing['variant_id'], "price": d['price']}]
+            "variants": [variant_update_input(product_data)]
         })
         errors = result.get('data', {}).get('productVariantsBulkUpdate', {}).get('userErrors', [])
         if errors:
@@ -1294,14 +1441,14 @@ def try_bulk_update(products: List[Dict]) -> Tuple[bool, int]:
 def try_bulk_price_update(products: List[Dict]) -> Tuple[bool, int]:
     """Apply price changes via bulk productVariantsBulkUpdate.
     (v3.x never updated prices in the bulk path at all.)"""
-    priced = [p for p in products if p.get('_flags', {}).get('price')]
+    priced = [p for p in products if needs_variant_update(p)]
     if not priced or DRY_RUN:
         return True, 0
 
-    log(f"Applying {len(priced)} price changes (bulk)...")
+    log(f"Applying {len(priced)} price / inventory-policy changes (bulk)...")
     lines = [{
         "productId": p['_existing']['product_id'],
-        "variants": [{"id": p['_existing']['variant_id'], "price": p['_desired']['price']}]
+        "variants": [variant_update_input(p)]
     } for p in priced]
 
     mutation = ("mutation call($productId: ID!, $variants: [ProductVariantsBulkInput!]!) "
@@ -1447,11 +1594,22 @@ def collection_exists(handle: str) -> bool:
     _collection_handle_cache[handle] = exists
     return exists
 
+def collection_handle_for(tag: str, known_handles: Set[str]) -> Optional[str]:
+    """Handle of the collection a category tag is shown in. A retired category
+    resolves to the one it was merged into, and a category whose collection
+    has a different handle (Filters -> filters-filtration) to that one."""
+    tag = RETIRED_HANDLES.get(tag, tag)
+    if tag not in known_handles:
+        return None
+    return COLLECTION_HANDLES.get(tag, tag)
+
+
 def redirect_target_for(existing: Dict, known_handles: Set[str]) -> str:
     """Pick the collection page for the product's category; homepage fallback."""
     for tag in existing.get('tags', []):
-        if tag in known_handles and collection_exists(tag):
-            return f"/collections/{tag}"
+        handle = collection_handle_for(tag, known_handles)
+        if handle and collection_exists(handle):
+            return f"/collections/{handle}"
     return "/"
 
 def create_url_redirect(path: str, target: str) -> bool:
@@ -1507,6 +1665,9 @@ def check_redirect_scope() -> bool:
                         .get('currentAppInstallation', {})
                         .get('accessScopes', []) or [])
     }
+    if scopes and 'write_publications' not in scopes:
+        log("MISSING SCOPE: write_publications is not granted - collections the sync "
+            "creates stay unpublished until it is added to the app.", 'WARNING')
     if 'write_online_store_navigation' not in scopes:
         log("=" * 70, 'WARNING')
         log("MISSING SCOPE: write_online_store_navigation is NOT granted.", 'WARNING')
@@ -1517,62 +1678,98 @@ def check_redirect_scope() -> bool:
         return False
     return True
 
-def archive_product(sku: str, existing: Dict, known_handles: Set[str]) -> bool:
-    """Archive a product (set to DRAFT) and 301-redirect its URL to the
-    matching collection so Google doesn't accumulate 404s."""
-    if existing.get('status') in ('DRAFT', 'ARCHIVED'):
-        # ARCHIVED matters as much as DRAFT here: this function "archives" by
-        # setting DRAFT, so without the ARCHIVED case it would take a properly
-        # archived product and *un*-archive it back to DRAFT.
-        return True  # Already archived
+def set_product_status(existing: Dict, status: str, tags: Optional[List[str]] = None) -> bool:
+    product = {'id': existing['product_id'], 'status': status}
+    if tags is not None:
+        product['tags'] = tags
+    result = graphql_request(PRODUCT_UPDATE_MUTATION, {'product': product})
+    payload = result.get('data', {}).get('productUpdate', {}) or {}
+    if payload.get('userErrors'):
+        log(f"Could not set {existing.get('sku', existing['product_id'])} to {status}: "
+            f"{payload['userErrors']}", 'WARNING')
+    return bool(payload.get('product')) and not payload.get('userErrors')
 
+
+def archive_product(existing: Dict, known_handles: Set[str]) -> bool:
+    """Archive a product that left the feed: status ARCHIVED, tagged
+    sync:discontinued, and its URL 301-redirected to its category collection
+    so Google doesn't accumulate 404s."""
+    if existing.get('status') == 'ARCHIVED':
+        return True
     if DRY_RUN:
         return True
 
-    result = graphql_request(PRODUCT_UPDATE_MUTATION, {
-        'product': {
-            'id': existing['product_id'],
-            'status': 'DRAFT'
-        }
-    })
-
-    ok = bool(result.get('data', {}).get('productUpdate', {}).get('product'))
+    tags = sorted(set(existing.get('tags') or []) | {DISCONTINUED_TAG})
+    ok = set_product_status(existing, 'ARCHIVED', tags)
     if ok and existing.get('handle'):
         target = redirect_target_for(existing, known_handles)
         create_url_redirect(f"/products/{existing['handle']}", target)
     return ok
 
 
-def archive_missing_products(missing_skus: List[str], existing_products: Dict[str, Dict],
-                             known_handles: Set[str]) -> Dict:
-    """Draft the live products whose SKU has left the feed.
+def retire_products(feed_skus: Set[str], blocked: Dict[str, str],
+                    existing_products: Dict[str, Dict], known_handles: Set[str]) -> Dict:
+    """Take off the storefront what should not be on it.
 
-    Most "missing" SKUs were drafted on an earlier run and simply stay absent,
-    so only the ones still ACTIVE count. Past MAX_ARCHIVE_PER_RUN of those the
-    pass drafts nothing: a feed that came back short looks exactly like a mass
-    delisting, and main() fails the run so someone looks.
+    - SKU no longer in the feed at all -> ARCHIVED + 301 redirect. That covers
+      live products and drafts alike, so drafts left behind by earlier runs
+      (which only drafted) are archived the first time this runs.
+    - SKU in the feed but excluded by a never-sell rule ($0 price,
+      placeholder, used, JV promo merch / boxes) -> held in DRAFT. Not
+      archived: the row is still there and its price can come back.
+    - Products tagged as another supplier's (PROTECTED_TAGS) are left alone.
+
+    Only LIVE products count against MAX_ARCHIVE_PER_RUN. Past the cap, or
+    when the feed looks truncated, nothing at all is retired: a feed that came
+    back short looks exactly like a mass delisting, and main() fails the run
+    so someone looks.
     """
-    result = {'live': [], 'drafted': [], 'refused': False}
-    if not missing_skus or not ARCHIVE_MISSING:
+    result = {'live': [], 'archived': [], 'drafted': [], 'backlog': 0,
+              'refused': False, 'reason': ''}
+    if not ARCHIVE_MISSING:
         return result
 
-    result['live'] = [dict(existing_products[sku], sku=sku) for sku in missing_skus
-                      if existing_products[sku].get('status') == 'ACTIVE']
-    already = len(missing_skus) - len(result['live'])
-    log(f"\n{len(missing_skus)} SKUs absent from feed: {already} already drafted, "
-        f"{len(result['live'])} still live")
+    gone, hold = [], []
+    for sku, existing in existing_products.items():
+        if is_protected(existing):
+            continue
+        record = dict(existing, sku=sku)
+        if sku not in feed_skus:
+            gone.append(record)                 # ACTIVE or DRAFT (archived ones are not in the lookup)
+        elif sku in blocked and existing.get('status') == 'ACTIVE':
+            record['why'] = f"held as draft: {blocked[sku]}"
+            hold.append(record)
 
-    if len(result['live']) > MAX_ARCHIVE_PER_RUN:
+    live_gone = [r for r in gone if r.get('status') == 'ACTIVE']
+    result['backlog'] = len(gone) - len(live_gone)
+    result['live'] = live_gone + hold
+    log(f"\n{len(gone)} products are no longer in the feed: {len(live_gone)} live, "
+        f"{result['backlog']} drafts to archive. {len(hold)} live products are "
+        f"excluded by a never-sell rule.")
+
+    if len(feed_skus) < FEED_MIN_SKUS:
         result['refused'] = True
-        log(f"Refusing to draft {len(result['live'])} live products in one run "
-            f"(cap {MAX_ARCHIVE_PER_RUN}); nothing archived", 'ERROR')
+        result['reason'] = (f"the feed has only {len(feed_skus)} SKUs (expected at least "
+                            f"{FEED_MIN_SKUS}); it looks truncated")
+    elif len(result['live']) > MAX_ARCHIVE_PER_RUN:
+        result['refused'] = True
+        result['reason'] = (f"{len(result['live'])} live products would leave the storefront "
+                            f"in one run (cap {MAX_ARCHIVE_PER_RUN})")
+    if result['refused']:
+        log(f"Refusing to archive anything: {result['reason']}", 'ERROR')
         return result
 
-    for existing in result['live']:
-        if archive_product(existing['sku'], existing, known_handles):
-            result['drafted'].append(existing)
-    if result['live']:
-        log(f"✓ Drafted {len(result['drafted'])} products (with 301 redirects)")
+    for record in gone:
+        if archive_product(record, known_handles):
+            result['archived'].append(record)
+        if len(result['archived']) % 100 == 0 and result['archived']:
+            log(f"  Archived {len(result['archived'])}/{len(gone)}")
+    for record in hold:
+        if DRY_RUN or set_product_status(record, 'DRAFT'):
+            result['drafted'].append(record)
+    if gone or hold:
+        log(f"✓ Archived {len(result['archived'])} products (with 301 redirects); "
+            f"held {len(result['drafted'])} as drafts")
     return result
 
 
@@ -1633,7 +1830,7 @@ def attach_missing_photos(products: List[Dict], existing_products: Dict[str, Dic
     return len(bare), attached
 
 
-def write_job_summary(stats: Dict, archive: Dict, skipped_products: List[Dict]) -> None:
+def write_job_summary(stats: Dict, archive: Dict, models: Dict) -> None:
     """Append the run's results to the GitHub job summary, when there is one.
 
     A scheduled run reports nowhere else, and the workflow's own summary line
@@ -1646,34 +1843,43 @@ def write_job_summary(stats: Dict, archive: Dict, skipped_products: List[Dict]) 
     def cell(text: str) -> str:
         return str(text).replace('|', '\\|').replace('\n', ' ')
 
+    live_archived = [p for p in archive['archived'] if p.get('status') == 'ACTIVE']
     lines = [
         "### Product sync" + (" (dry run)" if DRY_RUN else ""),
         "",
-        "| Created | Updated | Inventory | Photos added | Unchanged | Drafted | Feed rows skipped |",
-        "|---|---|---|---|---|---|---|",
+        "| Created | Updated | Inventory | Photos added | Unchanged | Archived | Held as draft | Feed rows skipped |",
+        "|---|---|---|---|---|---|---|---|",
         f"| {stats['created']} | {stats['updated']} | {stats['inventoried']} | "
-        f"{stats['photos']} of {stats['photoless']} without | "
-        f"{stats['unchanged']} | {len(archive['drafted'])} | {len(skipped_products)} |",
+        f"{stats['photos']} of {stats['photoless']} without | {stats['unchanged']} | "
+        f"{len(archive['archived'])} ({len(live_archived)} were live, "
+        f"{len(archive['archived']) - len(live_archived)} were drafts) | "
+        f"{len(archive['drafted'])} | {stats['skipped']} |",
+        "",
+        "### Model back-fill (parts with no compatible models)",
+        "",
+        "| Parts without models | Filled by rules | Filled by AI | AI unsure (review) | AI found none | Still waiting |",
+        "|---|---|---|---|---|---|",
+        f"| {models['empty']} | {models['rule']} | {models['ai']} | {models['ai_low']} | "
+        f"{models['none']} | {models['waiting']} |",
         "",
     ]
+    if models['ai_skipped']:
+        lines += [f"AI pass skipped: {models['ai_skipped']}.", ""]
 
     if archive['refused']:
         lines += [
             "### ⛔ Archive pass refused",
-            f"{len(archive['live'])} live products are absent from today's feed, over the "
-            f"cap of {MAX_ARCHIVE_PER_RUN}. Nothing was drafted. If the feed is intact and "
+            f"Nothing was archived or drafted: {archive['reason']}. If the feed is intact and "
             "this is a real delisting, re-run the workflow with a higher `archive_cap`.",
             "",
         ]
 
-    rows = archive['live'] if archive['refused'] else archive['drafted']
+    rows = archive['live'] if archive['refused'] else live_archived + archive['drafted']
     if rows:
-        verb = "Would draft" if (archive['refused'] or DRY_RUN) else "Drafted"
-        skip_reason = {p.get('SKU'): p.get('skip_reason') for p in skipped_products}
-        lines += [f"### {verb}: left the feed", "", "| SKU | Title | Why |", "|---|---|---|"]
+        verb = "Would leave the storefront" if (archive['refused'] or DRY_RUN) else "Left the storefront"
+        lines += [f"### {verb}", "", "| SKU | Title | Why |", "|---|---|---|"]
         for p in rows[:200]:
-            why = skip_reason.get(p['sku'])
-            why = f"skipped by rule: {why}" if why else "no longer in JohnnyVac feed"
+            why = p.get('why') or "no longer in JohnnyVac feed: archived + redirected"
             lines.append(f"| {cell(p['sku'])} | {cell(p['title'])} | {cell(why)} |")
         if len(rows) > 200:
             lines.append(f"| … | {len(rows) - 200} more | |")
@@ -1681,6 +1887,129 @@ def write_job_summary(stats: Dict, archive: Dict, skipped_products: List[Dict]) 
 
     with open(path, 'a', encoding='utf-8') as f:
         f.write("\n".join(lines) + "\n")
+
+
+# =============================================================================
+# MODEL BACK-FILL (parts with no compatible models)
+# =============================================================================
+
+def is_part(product: Dict) -> bool:
+    return (product.get('category') or {}).get('product_type', '').startswith(PARTS_TYPE_PREFIX)
+
+
+def backfill_models(products: List[Dict], existing_products: Dict[str, Dict],
+                    fits: Dict[str, List[str]]) -> Dict:
+    """Find models for ACTIVE parts that have none (see model_backfill.py).
+
+    Sets product['_backfill_models'] and product['_model_tag']; the normal
+    update path then writes them like any other change. Every result is added
+    to needs_review.csv."""
+    stats = {'empty': 0, 'rule': 0, 'ai': 0, 'ai_low': 0, 'none': 0, 'waiting': 0,
+             'ai_skipped': '', 'review': []}
+
+    # "A known model" = one the catalogue already lists somewhere: on any
+    # product's compatible_models, or found by the feed's fitment links.
+    known = build_known_index(
+        [m for e in existing_products.values() for m in e.get('compatible_models') or []]
+        + [m for models in fits.values() for m in models])
+
+    candidates = []
+    for p in products:
+        sku = p.get('SKU', '')
+        existing = existing_products.get(sku)
+        if not existing or existing.get('status') != 'ACTIVE' or not is_part(p) or is_protected(existing):
+            continue
+        title = clean_title(p.get('ProductTitleEN', ''), sku)
+        tags = set(existing.get('tags') or [])
+        stored = existing.get('compatible_models') or []
+        description = strip_html(p.get('ProductDescriptionEN', ''))
+        own = own_identifiers(sku, title, description, extra=[p.get('upc') or ''])
+        if stored:
+            # A rule-filled part is looked at again each run: the rules only
+            # keep models the catalogue already knows, so as more models are
+            # entered elsewhere this list can grow (merged, never replaced).
+            if TAG_RULE in tags:
+                more = rule_models(f"{title}. {description}", known, own)
+                if len(merge_models(stored, more)) > len(stored):
+                    p['_backfill_models'] = more
+                    stats['review'].append((p, TAG_RULE, more))
+            continue
+        desired_stub = {'sku': sku, 'title': title, 'upc': p.get('upc'),
+                        'product_type': p['category']['product_type'],
+                        'fits_models': p.get('_fits', [])}
+        if fitment_models(desired_stub):
+            continue        # the regular fitment pass fills this one
+        stats['empty'] += 1
+        found = rule_models(f"{title}. {description}", known, own)
+        if found:
+            p['_backfill_models'], p['_model_tag'] = found, TAG_RULE
+            stats['rule'] += 1
+            stats['review'].append((p, TAG_RULE, found))
+            continue
+        if TAG_NONE in tags or TAG_AI_LOW in tags:
+            stats['none'] += TAG_NONE in tags
+            continue        # the AI already looked at this one
+        candidates.append({'product': p, 'sku': sku, 'title': title, 'description': description,
+                           'own_ids': own, 'own_labels': {sku, p.get('upc') or sku}})
+
+    if not candidates:
+        pass
+    elif not ai_available():
+        stats['ai_skipped'] = "no ANTHROPIC_API_KEY secret"
+    elif DRY_RUN:
+        stats['ai_skipped'] = "dry run"
+    elif MODEL_AI_CAP <= 0:
+        stats['ai_skipped'] = "MODEL_AI_CAP is 0"
+    else:
+        batch = candidates[:MODEL_AI_CAP]
+        log(f"AI model pass: {len(batch)} of {len(candidates)} parts (cap {MODEL_AI_CAP})...")
+        answers = ai_models(batch, log=log)
+        for item in batch:
+            answer = answers.get(item['sku'])
+            if answer is None:
+                continue                # request failed: asked again next run
+            p = item['product']
+            if answer['models'] and answer['confidence'] == 'high':
+                p['_backfill_models'], p['_model_tag'] = answer['models'], TAG_AI
+                stats['ai'] += 1
+            elif answer['models']:
+                p['_model_tag'] = TAG_AI_LOW    # listed for review, not written
+                stats['ai_low'] += 1
+            else:
+                p['_model_tag'] = TAG_NONE
+                stats['none'] += 1
+            if answer['models']:
+                stats['review'].append((p, p['_model_tag'], answer['models']))
+    stats['waiting'] = sum(1 for c in candidates if '_model_tag' not in c['product'])
+
+    log(f"Model back-fill: {stats['empty']} active parts have no models; rules filled "
+        f"{stats['rule']}, AI filled {stats['ai']} ({stats['ai_low']} unsure, "
+        f"{stats['none']} with no model in the text), {stats['waiting']} still waiting"
+        + (f" (AI pass skipped: {stats['ai_skipped']})" if stats['ai_skipped'] else ""))
+    return stats
+
+
+def append_models_to_review(review: List[Tuple[Dict, str, List[str]]], path: str = 'needs_review.csv') -> None:
+    """List the back-fill's results in needs_review.csv, under the rows the
+    categorizer wrote, so a person can spot-check them."""
+    if not review:
+        return
+    fields = ['SKU', 'ProductTitleEN', 'ProductTitleFR', 'JV_Category', 'Reason']
+    new_file = not os.path.exists(path)
+    with open(path, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        if new_file:
+            writer.writeheader()
+        for product, tag, models in review:
+            note = ("AI was unsure - NOT written, check by hand" if tag == TAG_AI_LOW
+                    else "written to custom.compatible_models")
+            writer.writerow({
+                'SKU': product.get('SKU', ''),
+                'ProductTitleEN': product.get('ProductTitleEN', ''),
+                'ProductTitleFR': product.get('ProductTitleFR', ''),
+                'JV_Category': product.get('ProductCategory', ''),
+                'Reason': f"{tag}: {', '.join(models)} ({note})",
+            })
 
 # =============================================================================
 # MAIN
@@ -1690,9 +2019,10 @@ def main():
     start_time = time.time()
 
     log("=" * 70)
-    log("JohnnyVac to Shopify Sync v4.0 - CONTENT, SEO & INVENTORY OVERHAUL")
+    log("JohnnyVac to Shopify Sync v4.1")
     log("=" * 70)
-    log("Inventory + price sync fixed | descriptions protected | SEO + taxonomy + brand set")
+    log("Stock rule: " + ("live once in stock, sold-out pages stay up, zero stock is never activated"
+                          if KEEP_OOS_ACTIVE else "zero stock -> draft"))
     log(f"AI descriptions: {'ENABLED (Claude API)' if ai_available() else 'disabled (no ANTHROPIC_API_KEY — using templates)'}")
 
     if DRY_RUN:
@@ -1711,6 +2041,11 @@ def main():
     log("\n[1/8] Initializing categorization system...")
     categorizer = ProductCategorizer('category_map_v4.json')
     known_handles = set(categorizer.category_by_handle.keys())
+    RETIRED_HANDLES.update(
+        categorizer.rules.get('settings', {}).get('collections', {}).get('retired_handles', {}))
+    COLLECTION_HANDLES.update({h: c['collection_handle']
+                               for h, c in categorizer.category_by_handle.items()
+                               if c.get('collection_handle')})
 
     # Step 2: Fetch CSV
     log("\n[2/8] Fetching CSV data...")
@@ -1722,7 +2057,10 @@ def main():
         csv_products, language=LANGUAGE, skip_placeholders=True
     )
     log(f"✓ Categorized {len(categorized_products)} products")
-    log(f"  Skipped {len(skipped_products)} placeholder products")
+    log(f"  Skipped {len(skipped_products)} rows the never-sell rules exclude "
+        f"($0 price, placeholders, used, promo merch / boxes)")
+    feed_skus = {p.get('SKU', '') for p in csv_products}
+    blocked = {p.get('SKU', ''): p.get('skip_reason', '') for p in skipped_products}
 
     # Export reports
     categorizer.export_needs_review(categorized_products, 'needs_review.csv')
@@ -1758,9 +2096,14 @@ def main():
     log(f"Fitment: {len(fits)} parts name the machines they fit; "
         f"{len(parts_by_machine)} machines have a parts list")
 
+    # Models for active parts that have none (rules, then AI). Before the
+    # delta, so what it finds is written by the normal update path.
+    model_stats = backfill_models(categorized_products, existing_products, fits)
+    append_models_to_review(model_stats['review'])
+
     # Step 5: Calculate delta
     log("\n[5/8] Calculating delta...")
-    to_create, to_update, unchanged, missing_skus = calculate_delta(
+    to_create, to_update, unchanged = calculate_delta(
         categorized_products, existing_products, known_handles
     )
 
@@ -1800,12 +2143,11 @@ def main():
                 price_ok, _ = try_bulk_price_update(to_update)
                 if not price_ok:
                     log("Bulk price update failed — applying prices individually...")
-                    priced = [p for p in to_update if p.get('_flags', {}).get('price')]
+                    priced = [p for p in to_update if needs_variant_update(p)]
                     def apply_price(p):
                         result = graphql_request(VARIANT_PRICE_MUTATION, {
                             "productId": p['_existing']['product_id'],
-                            "variants": [{"id": p['_existing']['variant_id'],
-                                          "price": p['_desired']['price']}]
+                            "variants": [variant_update_input(p)]
                         })
                         return not result.get('data', {}).get('productVariantsBulkUpdate', {}).get('userErrors', [])
                     batch_process(priced, "Pricing", apply_price)
@@ -1821,8 +2163,8 @@ def main():
     sync_time = time.time() - sync_start
 
     # Step 8: Archive missing
-    log("\n[8/8] Archiving missing products...")
-    archive = archive_missing_products(missing_skus, existing_products, known_handles)
+    log("\n[8/8] Archiving products that left the feed...")
+    archive = retire_products(feed_skus, blocked, existing_products, known_handles)
 
     # Summary
     total_time = time.time() - start_time
@@ -1837,8 +2179,11 @@ def main():
     log(f"  📦 Inventory synced: {inventoried}")
     log(f"  🖼️  Photos added: {photos} ({photoless} live products had none)")
     log(f"  ⏭️  Unchanged: {len(unchanged)} (skipping)")
-    log(f"  🗑️  Drafted: {len(archive['drafted'])} (left the feed; with 301 redirects)")
-    log(f"  ⛔ Skipped: {len(skipped_products)}")
+    log(f"  🗑️  Archived: {len(archive['archived'])} (left the feed; with 301 redirects; "
+        f"{archive['backlog']} of them were drafts)")
+    log(f"  📝 Held as draft: {len(archive['drafted'])} (in the feed, excluded by a never-sell rule)")
+    log(f"  🔎 Models back-filled: {model_stats['rule']} by rules, {model_stats['ai']} by AI")
+    log(f"  ⛔ Feed rows skipped: {len(skipped_products)}")
     log(f"\nPerformance:")
     log(f"  Fetch existing: {fetch_time:.1f}s (bulk query)")
     log(f"  Sync operations: {sync_time:.1f}s")
@@ -1848,8 +2193,9 @@ def main():
 
     write_job_summary(
         {'created': created, 'updated': updated, 'inventoried': inventoried,
-         'photos': photos, 'photoless': photoless, 'unchanged': len(unchanged)},
-        archive, skipped_products,
+         'photos': photos, 'photoless': photoless, 'unchanged': len(unchanged),
+         'skipped': len(skipped_products)},
+        archive, model_stats,
     )
     if archive['refused']:
         # Everything above already happened; only the archive pass was held

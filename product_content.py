@@ -43,25 +43,120 @@ BRANDS = [
 
 DEFAULT_VENDOR = "JohnnyVac"
 
+# -----------------------------------------------------------------------------
+# Brand detection. Vendor (and custom.brand) is the BRAND, never the supplier:
+# supplier routing runs on tags. The feed has no brand column -- its columns
+# are SKU, titles, descriptions, upc, price, inventory, dimensions, image,
+# ProductCategory and AssociatedSkus -- so the brand comes from the title
+# (which title_cleaner has already given the brand behind a supplier code:
+# "Crevice Tool - Bissell 2036655").
+#
+# Order of preference:
+#   1. the brand a part is made FOR: "Bag for Hoover ...", "fits Eureka ..."
+#   2. the first machine brand named anywhere in the title
+#   3. the first product / component maker named (Envirocare, Plastiflex, ...)
+#   4. nothing found -> the fallback vendor (settings.brands.fallback_vendor)
+# JohnnyVac counts as a machine brand only where the title says so: "Johnny
+# Vac", a JV model number (JV58, JVC50BC) or one of its house model names.
+# -----------------------------------------------------------------------------
+
+# canonical name -> spellings (regex fragments, matched on word boundaries)
+MACHINE_BRANDS = {
+    "JohnnyVac": [r"johnny\s*vac", r"jvac", r"JVC?\d{2,}\w*", r"silenzio", r"hydrogen",
+                  r"juliette", r"parke", r"delozio", r"superlux", r"condolux", r"powerlux"],
+    "Filter Queen": [r"filter\s*queen"], "Dirt Devil": [r"dirt\s*devil"],
+    "Bissell": [r"bissell?"], "Compact": [r"Compact|COMPACT"], "Dyson": [r"dyson"],
+    "Electrolux": [r"electrolux"], "Eureka": [r"eureka"], "Fuller": [r"fuller"],
+    "Ghibli": [r"ghibli"], "Hoover": [r"hoover"], "Intervac": [r"intervac"],
+    "Karcher": [r"k[aä]rcher"], "Kenmore": [r"kenmore"], "Kirby": [r"kirby"],
+    "Maytag": [r"maytag"], "Miele": [r"miele"], "Nilfisk": [r"nilfisk"],
+    "Oreck": [r"oreck"], "Panasonic": [r"panasonic"], "Perfect": [r"Perfect|PERFECT"],
+    "ProTeam": [r"pro-?\s?team"], "Rainbow": [r"Rainbow|RAINBOW"], "Riccar": [r"riccar"],
+    "Roval": [r"roval"], "Royal": [r"Royal|ROYAL"], "Samsung": [r"samsung"],
+    "Sanitaire": [r"sanitaire"], "Sanyo": [r"sanyo"], "Shark": [r"Shark|SHARK"],
+    "Simplicity": [r"simplicity"], "Tennant": [r"tennant"], "Tristar": [r"tristar"],
+    "Vortech": [r"vortech"], "Wirbel": [r"wirbel"],
+    "Beam": [r"Beam|BEAM"], "Sebo": [r"sebo"], "Zelmer": [r"zelmer"], "EDIC": [r"edic"],
+    "Koblenz": [r"koblenz"], "Shop-Vac": [r"shop[\s-]?vac"], "Lindhaus": [r"lindhaus"],
+    "Windsor": [r"Windsor|WINDSOR"], "Sharp": [r"Sharp|SHARP"], "Bosch": [r"bosch"],
+    "Nutone": [r"nutone"], "Cana-Vac": [r"cana-?\s?vac"], "RhinoVac": [r"rhino\s?vac"],
+    "Duovac": [r"duovac"], "Vacumaid": [r"vacumaid"], "Husky": [r"Husky|HUSKY"],
+    "Taski": [r"taski"], "Soteco": [r"soteco"], "Numatic": [r"numatic"],
+    "Carpet Pro": [r"carpet\s?pro"], "TurboCat": [r"turbocat"], "Doc It": [r"doc[\s-]it"],
+    "Hide-A-Hose": [r"hide[\s-]?a[\s-]?hose"], "Pudu": [r"pudu"], "Clarke": [r"clarke"],
+    "Ridgid": [r"ridgid"],
+}
+MAKER_BRANDS = {
+    "Ametek": [r"ametek", r"Lamb|LAMB"], "Domel": [r"domel"], "Envirocare": [r"envirocare"],
+    "Plastiflex": [r"plastiflex"], "Wessel-Werk": [r"wessel[\s-]?werk"],
+    "Hayden": [r"hayden"], "Canplas": [r"canplas"], "Shurflo": [r"shurflo"],
+    "Safeblend": [r"safeblend"], "Attax": [r"attax"], "Wiese": [r"wiese"],
+    "Floralie": [r"floralie"], "Cascades": [r"cascades"], "Unger": [r"unger"],
+    "Bona": [r"Bona|BONA"], "Sprayway": [r"sprayway"], "Aurelia": [r"aurelia"],
+    "Big D": [r"Big D|BIG D"], "Dustbane": [r"dustbane"],
+}
+# Everyday words that are also brands: not a brand in these phrases.
+_NOT_A_BRAND = re.compile(
+    r"\b(?:perfect\s+(?:for|fit)|compact\s+(?:size|design|and|model|canister\s+vacuum\s+cleaner\s+-)|"
+    r"royal\s+blue|beam\s+of|sharp\s+(?:edge|blade))", re.I)
+
+
+def _brand_regex(table: Dict[str, List[str]]):
+    out = []
+    for name, spellings in table.items():
+        for sp in spellings:
+            # a spelling written with capitals is matched case-sensitively
+            flags = 0 if any(c.isupper() for c in sp) else re.I
+            out.append((name, re.compile(r'(?<![A-Za-z0-9])(?:' + sp + r')(?![A-Za-z])', flags)))
+    return out
+
+
+_MACHINE_RE = _brand_regex(MACHINE_BRANDS)
+_MAKER_RE = _brand_regex(MAKER_BRANDS)
+_FOR_CLAUSE = re.compile(r'\b(?:for|fits?|to\s+fit|compatible\s+with)\b', re.I)
+
+_brand_settings: Optional[Dict] = None
+
+
+def brand_settings() -> Dict:
+    """settings.brands from category_map_v4.json: {"fallback_vendor": ...,
+    "merge": {"Riccar": "Simplicity"}}. Merges live in the map so a brand
+    collection that was merged away is not recreated by the next run."""
+    global _brand_settings
+    if _brand_settings is None:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'category_map_v4.json'), 'r', encoding='utf-8') as f:
+                _brand_settings = json.load(f).get('settings', {}).get('brands', {}) or {}
+        except (OSError, ValueError):
+            _brand_settings = {}
+    return _brand_settings
+
+
+def _first_brand(text: str, table) -> Optional[str]:
+    best = None
+    for name, rx in table:
+        m = rx.search(text)
+        if m and (best is None or m.start() < best[0]):
+            best = (m.start(), name)
+    return best[1] if best else None
+
 
 def extract_brand(title: str) -> Optional[str]:
-    """Extract the real brand from a product title. Returns None if unknown."""
-    text = (title or '').lower()
-    # "Perfect" is only a brand in specific contexts ("perfect for..." is not)
-    if 'perfect' in text:
-        if re.search(r'\bperfect\s+(vacuum|canister|upright|c\d+|pb\d+)', text, re.I):
-            return "Perfect"
-    for brand in BRANDS:
-        if brand.lower() == 'perfect':
-            continue
-        if brand.lower() in text:
-            return 'JohnnyVac' if 'johnny' in brand.lower() else brand
-    return None
+    """The brand a product is, or is made for. None when the title names none."""
+    text = _NOT_A_BRAND.sub(' ', title or '')
+    brand = None
+    for m in _FOR_CLAUSE.finditer(text):
+        brand = _first_brand(text[m.end():], _MACHINE_RE)
+        if brand:
+            break
+    brand = brand or _first_brand(text, _MACHINE_RE) or _first_brand(text, _MAKER_RE)
+    return brand_settings().get('merge', {}).get(brand, brand) if brand else None
 
 
 def compute_vendor(title: str) -> str:
-    """Vendor for Shopify = detected brand, falling back to JohnnyVac."""
-    return extract_brand(title) or DEFAULT_VENDOR
+    """Vendor for Shopify = detected brand, else the configured fallback."""
+    return extract_brand(title) or brand_settings().get('fallback_vendor') or DEFAULT_VENDOR
 
 
 # =============================================================================
