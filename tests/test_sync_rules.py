@@ -156,54 +156,44 @@ class CompatibleModels(SyncTestCase):
         self.assertIn('models:rule', b7['_final_tags'])
 
 
-class AiPass(unittest.TestCase):
-    """The AI pass against a stand-in for the anthropic SDK."""
+class OwnedByShopify(SyncTestCase):
+    """Brand Fixer maintains vendor, title and custom.brand on existing
+    products; the sync must not reset them."""
 
-    def test_only_models_written_in_the_text_are_accepted(self):
-        import types
-        import model_backfill
+    def update_for(self, **over):
+        rows, _ = self.categorized([feed_row('VT1', 'BRUSH ROLL HOOVER hoover_AH10040', inventory='0')])
+        store = {'VT1': existing('VT1', inventory=5, **over)}
+        _, to_update, unchanged = sync.calculate_delta(rows, store, HANDLES)
+        return (to_update + unchanged)[0]
 
-        class APIError(Exception):
-            pass
+    def test_existing_vendor_and_title_are_never_written(self):
+        product = self.update_for(title='Brush Roll Hoover AH10040', vendor='Hoover', brand='Hoover')
+        self.assertTrue(product['_flags']['inventory'])           # it is updated...
+        self.assertFalse(product['_flags']['core'])               # ...but not for its title
+        update = sync.build_update_input(product)
+        self.assertNotIn('title', update)
+        self.assertNotIn('vendor', update)
+        self.assertNotIn('brand', [m['key'] for m in update['metafields']])
 
-        seen = []
+    def test_stored_brand_is_kept(self):
+        product = self.update_for(vendor='JohnnyVac', brand='Eureka')   # whatever Brand Fixer set
+        self.assertFalse(product['_flags']['brand'])
+        self.assertNotIn('brand', [m['key'] for m in sync.build_update_input(product)['metafields']])
 
-        class Messages:
-            def create(self, **kwargs):
-                seen.append(kwargs)
-                text = kwargs['messages'][0]['content']
-                if 'UH70120' in text:
-                    body = {"models": ["UH70120", "UH70125", "562289001"], "confidence": "high"}
-                elif 'maybe' in text:
-                    body = {"models": ["4122"], "confidence": "low"}
-                else:
-                    body = {"models": [], "confidence": "high"}
-                block = types.SimpleNamespace(type='text', text=json.dumps(body))
-                return types.SimpleNamespace(stop_reason='end_turn', content=[block])
+    def test_empty_brand_is_filled(self):
+        product = self.update_for(brand='')
+        self.assertTrue(product['_flags']['brand'])
+        fields = {m['key']: m['value'] for m in sync.build_update_input(product)['metafields']}
+        self.assertEqual(fields['brand'], 'Hoover')
 
-        fake = types.SimpleNamespace(
-            Anthropic=lambda: types.SimpleNamespace(messages=Messages()),
-            APIError=APIError, AuthenticationError=type('A', (APIError,), {}),
-            PermissionDeniedError=type('P', (APIError,), {}), NotFoundError=type('N', (APIError,), {}),
-            BadRequestError=type('B', (APIError,), {}))
-        sys.modules['anthropic'] = fake
-        os.environ['ANTHROPIC_API_KEY'] = 'test'
-        try:
-            items = [
-                {'sku': 'hoover_562289001', 'title': 'Belt for Hoover UH70120 - 562289001', 'description': '',
-                 'own_ids': {'562289001', 'HOOVER562289001'}},
-                {'sku': 'X2', 'title': 'Filter maybe Zing 4122', 'description': '', 'own_ids': {'X2'}},
-                {'sku': 'X3', 'title': 'Plain Wheel', 'description': '', 'own_ids': {'X3'}},
-            ]
-            out = model_backfill.ai_models(items, log=lambda m: None)
-        finally:
-            del sys.modules['anthropic']
-            del os.environ['ANTHROPIC_API_KEY']
-        self.assertEqual(out['hoover_562289001'], {'models': ['UH70120'], 'confidence': 'high'})
-        self.assertEqual(out['X2'], {'models': ['4122'], 'confidence': 'low'})
-        self.assertEqual(out['X3'], {'models': [], 'confidence': 'high'})
-        self.assertEqual(seen[0]['output_config']['format']['type'], 'json_schema')
-        self.assertEqual(seen[0]['model'], 'claude-sonnet-5-5')
+    def test_new_products_get_vendor_title_and_brand(self):
+        rows, _ = self.categorized([feed_row('NEW1', 'Crevice Tool bissel_2036655')])
+        to_create, _, _ = sync.calculate_delta(rows, {}, HANDLES)
+        created = sync.build_create_input(to_create[0], 'loc')
+        self.assertEqual(created['title'], 'Crevice Tool - Bissell 2036655')
+        self.assertEqual(created['vendor'], 'Bissell')
+        self.assertIn({'namespace': 'custom', 'key': 'brand', 'value': 'Bissell',
+                       'type': 'single_line_text_field'}, created['metafields'])
 
 
 class Retire(SyncTestCase):

@@ -14,8 +14,7 @@ CHANGES from v3.4:
 - FIXED: rich descriptions are PROTECTED. The sync only writes a description
   when the existing one is thin (< 80 chars of text); enriched descriptions
   from description_generator.py / the AI engine are never overwritten.
-- NEW: new/thin products get a rich description at sync time (Claude AI via
-  ANTHROPIC_API_KEY when available, template fallback otherwise).
+- NEW: new/thin products get a rich description at sync time (templates).
 - NEW: SEO meta title/description set on create, and backfilled on products
   that have none.
 - NEW: vendor = real detected brand (Hoover, Miele, ...) instead of
@@ -40,8 +39,15 @@ v4.1 (2026-11):
 - One stock rule (see desired_status): a product goes live the first time it
   has stock and is never activated at zero stock.
 - custom.compatible_models is merged with what is stored, never replaced.
-- Model back-fill for parts with no models (rules, then AI) -- model_backfill.py.
+- Model back-fill for parts with no models (rule pass) -- model_backfill.py.
 - Vendor / custom.brand = the machine brand (product_content.extract_brand).
+
+v4.2 (2026-11-25):
+- Vendor and title are set only when a product is created, and custom.brand
+  only filled when it is empty. The Brand Fixer app in Shopify owns them on
+  existing products; resetting them here made the two undo each other daily.
+- No AI steps (no ANTHROPIC_API_KEY): descriptions are templates, the model
+  back-fill is the rule pass only.
 """
 
 import os
@@ -61,14 +67,13 @@ from categorizer_v4 import ProductCategorizer
 from title_cleaner import clean_title
 from fitment import build_fitment
 from model_backfill import (
-    MODEL_TAG_PREFIX, TAG_AI, TAG_AI_LOW, TAG_NONE, TAG_RULE, ai_models,
-    build_known_index, merge_models, model_key, own_identifiers, rule_models,
+    MODEL_TAG_PREFIX, TAG_RULE, build_known_index, merge_models, model_key, own_identifiers, rule_models,
 )
 from product_content import (
-    adapt_metafields_to_definitions, ai_available, build_description,
+    adapt_metafields_to_definitions, build_description,
     compute_vendor, extract_brand, extract_compatible_models,
     extract_dimensions, extract_material, extract_pack_quantity,
-    generate_descriptions_ai, generate_seo_description, generate_seo_title,
+    generate_seo_description, generate_seo_title,
     strip_html, taxonomy_for_handle,
 )
 from shopify_auth import get_access_token
@@ -118,8 +123,6 @@ PROTECTED_TAGS = {t.strip().lower() for t in
 # KEEP_OOS_ACTIVE=false switches to the stricter rule: zero stock -> DRAFT.
 KEEP_OOS_ACTIVE = os.environ.get('KEEP_OOS_ACTIVE', 'true').lower() == 'true'
 
-# Most parts the AI model back-fill may look at per run.
-MODEL_AI_CAP = int(os.environ.get('MODEL_AI_CAP', '500'))
 PARTS_TYPE_PREFIX = 'Parts & Replacement Parts'
 
 # Description shorter than this (text chars) counts as "thin" and gets enriched
@@ -315,7 +318,11 @@ def build_metafields(desired: Dict) -> List[Dict]:
             })
 
     add('mpn', desired.get('sku', ''))
-    add('brand', extract_brand(title))
+    # custom.brand is set on a new product and filled when empty; a value
+    # already there is never overwritten (Brand Fixer keeps it matched to
+    # the vendor). stored_brand is None for a product that does not exist yet.
+    if not desired.get('stored_brand'):
+        add('brand', extract_brand(title))
     add('pack_quantity', extract_pack_quantity(title), 'number_integer')
     add('material', extract_material(title))
     models = final_models(desired)
@@ -400,6 +407,7 @@ def build_desired_state(product: Dict) -> Dict:
         'fits_models': product.get('_fits', []),
         'backfill_models': product.get('_backfill_models', []),
         'stored_models': [],
+        'stored_brand': None,
         'part_skus': product.get('_part_skus', []),
         'seo_description': generate_seo_description(title, sku, jv_desc),
     }
@@ -539,6 +547,9 @@ def get_existing_products_bulk() -> Dict[str, Dict]:
                 compatibleModels: metafield(namespace: "custom", key: "compatible_models") {
                   value
                 }
+                brand: metafield(namespace: "custom", key: "brand") {
+                  value
+                }
                 compatibleParts: metafield(namespace: "custom", key: "compatible_parts") {
                   value
                 }
@@ -664,6 +675,7 @@ def _existing_from_product_node(obj: Dict) -> Dict:
         'seo_description': (obj.get('seo') or {}).get('description', '') or '',
         'has_image': bool(obj.get('featuredMedia')),
         'compatible_models': _json_list((obj.get('compatibleModels') or {}).get('value')),
+        'brand': ((obj.get('brand') or {}).get('value') or '').strip(),
         'compatible_parts': _json_list((obj.get('compatibleParts') or {}).get('value')),
     }
 
@@ -840,6 +852,7 @@ def get_existing_products_paginated() -> Dict[str, Dict]:
                     seo { title description }
                     featuredMedia { id }
                     compatibleModels: metafield(namespace: "custom", key: "compatible_models") { value }
+                    brand: metafield(namespace: "custom", key: "brand") { value }
                     compatibleParts: metafield(namespace: "custom", key: "compatible_parts") { value }
                     variants(first: 5) {
                         edges {
@@ -915,7 +928,7 @@ def calculate_delta(
     held_back = 0
     restored = 0
 
-    counts = {'core': 0, 'price': 0, 'inventory': 0, 'vendor': 0, 'tags': 0,
+    counts = {'core': 0, 'price': 0, 'inventory': 0, 'brand': 0, 'tags': 0,
               'seo': 0, 'description': 0, 'category': 0, 'fitment': 0, 'policy': 0}
 
     for product in csv_products:
@@ -947,19 +960,22 @@ def calculate_delta(
 
         desired['status'] = desired_status(desired['inventory'], existing.get('status'))
         desired['stored_models'] = existing.get('compatible_models') or []
+        desired['stored_brand'] = existing.get('brand') or ''
         final_tags = merge_tags(existing.get('tags', []), desired['managed_tags'], known_handles,
                                 product.get('_model_tag'))
         product['_final_tags'] = final_tags
 
         flags = {
+            # Title and vendor are not compared: they are written only when a
+            # product is created (Brand Fixer maintains them after that).
             'core': (
-                existing['title'] != desired['title'] or
                 existing['product_type'] != desired['product_type'] or
                 existing['status'] != desired['status']
             ),
             'price': normalize_price(existing['price']) != desired['price'],
             'inventory': existing.get('inventory', 0) != desired['inventory'],
-            'vendor': existing.get('vendor', '') != desired['vendor'],
+            # custom.brand: filled only when empty
+            'brand': not desired['stored_brand'] and bool(extract_brand(desired['title'])),
             'tags': set(existing.get('tags', [])) != set(final_tags),
             # The sync owns SEO title + description (every stored one was
             # generated); tag a product seo:manual to keep hand-written ones.
@@ -1004,46 +1020,14 @@ def calculate_delta(
     return to_create, to_update, unchanged
 
 # =============================================================================
-# DESCRIPTION GENERATION PASS (AI with template fallback)
+# DESCRIPTION GENERATION (templates)
 # =============================================================================
-
-def needs_generated_description(product: Dict) -> bool:
-    """True when neither Shopify nor the JV feed has a rich description."""
-    desired = product['_desired']
-    if desired['jv_desc_is_rich']:
-        return False
-    if '_existing' in product:
-        return product.get('_flags', {}).get('description', False)
-    return True  # new product with thin JV description
-
-def generate_missing_descriptions(products: List[Dict]):
-    """One batched AI pass for every product that needs a generated description.
-    Results land in product['_ai_desc']; build_description() falls back to
-    templates for anything the AI pass didn't return."""
-    needing = [p for p in products if needs_generated_description(p)]
-    if not needing:
-        return
-
-    if ai_available() and not DRY_RUN:
-        log(f"Generating AI descriptions for {len(needing)} products (Claude API)...")
-        items = [{'sku': p['_desired']['sku'],
-                  'title': p['_desired']['title'],
-                  'product_type': p['_desired']['product_type']} for p in needing]
-        ai_results = generate_descriptions_ai(items)
-        for p in needing:
-            p['_ai_desc'] = ai_results.get(p['_desired']['sku'])
-        log(f"✓ AI generated {len(ai_results)} descriptions "
-            f"({len(needing) - len(ai_results)} will use templates)")
-    else:
-        engine = 'DRY RUN' if DRY_RUN else 'no ANTHROPIC_API_KEY'
-        log(f"{len(needing)} products need generated descriptions (templates — {engine})")
 
 def description_for(product: Dict) -> str:
     desired = product['_desired']
     return build_description(
         desired['title'], desired['product_type'], desired['sku'],
-        jv_desc_html=desired['jv_desc'], ai_desc=product.get('_ai_desc'),
-        min_length=MIN_DESCRIPTION_LENGTH,
+        jv_desc_html=desired['jv_desc'], min_length=MIN_DESCRIPTION_LENGTH,
     )
 
 # =============================================================================
@@ -1105,11 +1089,11 @@ def build_update_input(product: Dict) -> Dict:
     existing = product['_existing']
     flags = product.get('_flags', {})
 
+    # No title or vendor: those are set when the product is created and left
+    # to Brand Fixer afterwards.
     update_input = {
         "id": existing['product_id'],
-        "title": d['title'],
         "productType": d['product_type'],
-        "vendor": d['vendor'],
         "tags": product.get('_final_tags', sorted(set(d['managed_tags']))),
         "status": d['status'],
         "metafields": build_metafields(d),
@@ -1883,14 +1867,11 @@ def write_job_summary(stats: Dict, archive: Dict, models: Dict) -> None:
         "",
         "### Model back-fill (parts with no compatible models)",
         "",
-        "| Parts without models | Filled by rules | Filled by AI | AI unsure (review) | AI found none | Still waiting |",
-        "|---|---|---|---|---|---|",
-        f"| {models['empty']} | {models['rule']} | {models['ai']} | {models['ai_low']} | "
-        f"{models['none']} | {models['waiting']} |",
+        "| Parts without models | Filled by rules | Rule-filled parts that gained models |",
+        "|---|---|---|",
+        f"| {models['empty']} | {models['rule']} | {models['grew']} |",
         "",
     ]
-    if models['ai_skipped']:
-        lines += [f"AI pass skipped: {models['ai_skipped']}.", ""]
 
     if archive['refused']:
         lines += [
@@ -1925,13 +1906,13 @@ def is_part(product: Dict) -> bool:
 
 def backfill_models(products: List[Dict], existing_products: Dict[str, Dict],
                     fits: Dict[str, List[str]]) -> Dict:
-    """Find models for ACTIVE parts that have none (see model_backfill.py).
+    """Find models for ACTIVE parts that have none: rule pass only (see
+    model_backfill.py).
 
     Sets product['_backfill_models'] and product['_model_tag']; the normal
     update path then writes them like any other change. Every result is added
     to needs_review.csv."""
-    stats = {'empty': 0, 'rule': 0, 'ai': 0, 'ai_low': 0, 'none': 0, 'waiting': 0,
-             'ai_skipped': '', 'review': []}
+    stats = {'empty': 0, 'rule': 0, 'grew': 0, 'review': []}
 
     # "A known model" = one the catalogue already lists somewhere: on any
     # product's compatible_models, or found by the feed's fitment links.
@@ -1939,7 +1920,6 @@ def backfill_models(products: List[Dict], existing_products: Dict[str, Dict],
         [m for e in existing_products.values() for m in e.get('compatible_models') or []]
         + [m for models in fits.values() for m in models])
 
-    candidates = []
     for p in products:
         sku = p.get('SKU', '')
         existing = existing_products.get(sku)
@@ -1958,6 +1938,7 @@ def backfill_models(products: List[Dict], existing_products: Dict[str, Dict],
                 more = rule_models(f"{title}. {description}", known, own)
                 if len(merge_models(stored, more)) > len(stored):
                     p['_backfill_models'] = more
+                    stats['grew'] += 1
                     stats['review'].append((p, TAG_RULE, more))
             continue
         desired_stub = {'sku': sku, 'title': title, 'upc': p.get('upc'),
@@ -1971,47 +1952,9 @@ def backfill_models(products: List[Dict], existing_products: Dict[str, Dict],
             p['_backfill_models'], p['_model_tag'] = found, TAG_RULE
             stats['rule'] += 1
             stats['review'].append((p, TAG_RULE, found))
-            continue
-        if TAG_NONE in tags or TAG_AI_LOW in tags:
-            stats['none'] += TAG_NONE in tags
-            continue        # the AI already looked at this one
-        candidates.append({'product': p, 'sku': sku, 'title': title, 'description': description,
-                           'own_ids': own, 'own_labels': {sku, p.get('upc') or sku}})
 
-    if not candidates:
-        pass
-    elif not ai_available():
-        stats['ai_skipped'] = "no ANTHROPIC_API_KEY secret"
-    elif DRY_RUN:
-        stats['ai_skipped'] = "dry run"
-    elif MODEL_AI_CAP <= 0:
-        stats['ai_skipped'] = "MODEL_AI_CAP is 0"
-    else:
-        batch = candidates[:MODEL_AI_CAP]
-        log(f"AI model pass: {len(batch)} of {len(candidates)} parts (cap {MODEL_AI_CAP})...")
-        answers = ai_models(batch, log=log)
-        for item in batch:
-            answer = answers.get(item['sku'])
-            if answer is None:
-                continue                # request failed: asked again next run
-            p = item['product']
-            if answer['models'] and answer['confidence'] == 'high':
-                p['_backfill_models'], p['_model_tag'] = answer['models'], TAG_AI
-                stats['ai'] += 1
-            elif answer['models']:
-                p['_model_tag'] = TAG_AI_LOW    # listed for review, not written
-                stats['ai_low'] += 1
-            else:
-                p['_model_tag'] = TAG_NONE
-                stats['none'] += 1
-            if answer['models']:
-                stats['review'].append((p, p['_model_tag'], answer['models']))
-    stats['waiting'] = sum(1 for c in candidates if '_model_tag' not in c['product'])
-
-    log(f"Model back-fill: {stats['empty']} active parts have no models; rules filled "
-        f"{stats['rule']}, AI filled {stats['ai']} ({stats['ai_low']} unsure, "
-        f"{stats['none']} with no model in the text), {stats['waiting']} still waiting"
-        + (f" (AI pass skipped: {stats['ai_skipped']})" if stats['ai_skipped'] else ""))
+    log(f"Model back-fill (rules): {stats['empty']} active parts have no models; filled "
+        f"{stats['rule']}, and {stats['grew']} rule-filled parts gained models")
     return stats
 
 
@@ -2027,8 +1970,7 @@ def append_models_to_review(review: List[Tuple[Dict, str, List[str]]], path: str
         if new_file:
             writer.writeheader()
         for product, tag, models in review:
-            note = ("AI was unsure - NOT written, check by hand" if tag == TAG_AI_LOW
-                    else "written to custom.compatible_models")
+            note = "written to custom.compatible_models"
             writer.writerow({
                 'SKU': product.get('SKU', ''),
                 'ProductTitleEN': product.get('ProductTitleEN', ''),
@@ -2045,11 +1987,11 @@ def main():
     start_time = time.time()
 
     log("=" * 70)
-    log("JohnnyVac to Shopify Sync v4.1")
+    log("JohnnyVac to Shopify Sync v4.2")
     log("=" * 70)
     log("Stock rule: " + ("live once in stock, sold-out pages stay up, zero stock is never activated"
                           if KEEP_OOS_ACTIVE else "zero stock -> draft"))
-    log(f"AI descriptions: {'ENABLED (Claude API)' if ai_available() else 'disabled (no ANTHROPIC_API_KEY — using templates)'}")
+    log("Vendor / title: set on new products only (Brand Fixer maintains them in Shopify)")
 
     if DRY_RUN:
         log("🔸 DRY RUN MODE - No changes will be made", 'WARNING')
@@ -2133,9 +2075,12 @@ def main():
         categorized_products, existing_products, known_handles
     )
 
-    # Step 6: Generate descriptions for new/thin products (AI or templates)
-    log("\n[6/8] Generating descriptions for new/thin products...")
-    generate_missing_descriptions(to_create + to_update)
+    # Step 6: Descriptions for new/thin products (templates, built at write time)
+    log("\n[6/8] Descriptions for new/thin products...")
+    thin = sum(1 for p in to_create + to_update
+               if not p['_desired']['jv_desc_is_rich']
+               and ('_existing' not in p or p.get('_flags', {}).get('description')))
+    log(f"  {thin} products get a template description (the feed's own text is used where it has one)")
 
     # Step 7: Execute sync
     log("\n[7/8] Syncing to Shopify...")
@@ -2208,7 +2153,7 @@ def main():
     log(f"  🗑️  Archived: {len(archive['archived'])} (left the feed; with 301 redirects; "
         f"{archive['backlog']} of them were drafts)")
     log(f"  📝 Held as draft: {len(archive['drafted'])} (in the feed, excluded by a never-sell rule)")
-    log(f"  🔎 Models back-filled: {model_stats['rule']} by rules, {model_stats['ai']} by AI")
+    log(f"  🔎 Models back-filled (rules): {model_stats['rule']} parts filled, {model_stats['grew']} grew")
     log(f"  ⛔ Feed rows skipped: {len(skipped_products)}")
     log(f"\nPerformance:")
     log(f"  Fetch existing: {fetch_time:.1f}s (bulk query)")

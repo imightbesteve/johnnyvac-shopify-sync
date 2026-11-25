@@ -11,35 +11,23 @@ two rules hold everywhere in the sync:
   never one, and neither is a bag / belt type ("Type AB", "Type Q/C",
   "Style 5800").
 
-For active parts that have no models at all there is a back-fill:
-
-- Rule pass (free, every run): models named in title / description phrases
-  such as "for Hoover UH70120", "fits ...", "compatible with models 6582
-  and 6583". A match is kept only if it is already a known model somewhere
-  in the catalogue, so a part number or a dimension cannot get in.
-- AI pass (needs ANTHROPIC_API_KEY, capped per run): for parts the rules
-  leave empty, Claude returns {"models": [...], "confidence": "high|low"}.
-  Only models that literally appear in the part's text are accepted.
+For active parts that have no models at all there is a rule-based
+back-fill (free, every run): models named in title / description phrases
+such as "for Hoover UH70120", "fits ...", "compatible with models 6582 and
+6583". A match is kept only if it is already a known model somewhere in the
+catalogue, so a part number or a dimension cannot get in. There is no AI
+pass; models the rules cannot find are entered in Shopify (Sidekick).
 
 Models are normalized to upper case with no spaces; dashes stay as written
 (DCF-15, FBCC-1).
 
     python model_backfill.py        # run the examples
 """
-import json
-import os
 import re
-from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Set
 
 MAX_MODELS = 128            # Shopify's limit for a list metafield
-# Claude model for the AI pass. Its own setting, separate from the one that
-# writes product descriptions (ANTHROPIC_MODEL).
-AI_MODEL = os.environ.get('MODEL_BACKFILL_MODEL') or 'claude-sonnet-5-5'
 TAG_RULE = 'models:rule'
-TAG_AI = 'models:ai'
-TAG_AI_LOW = 'models:ai-low'    # AI was unsure: listed for review, not written
-TAG_NONE = 'models:none'        # AI found no model in the text: not asked again
 MODEL_TAG_PREFIX = 'models:'
 
 # "Type AB", "Types A and Z", "Style 5800", "Type Q/C": consumable types, not machines.
@@ -147,121 +135,6 @@ def rule_models(text: str, known: Dict[str, str], own_ids: Set[str], limit: int 
 
 
 # =============================================================================
-# AI pass
-# =============================================================================
-
-AI_SYSTEM_PROMPT = """You extract vacuum and cleaning-machine MODEL numbers from a replacement part's listing, for a store's "find parts for my machine" search.
-
-You are given one part: its title, description, SKU and part numbers. Reply with JSON only:
-{"models": [...], "confidence": "high" | "low"}
-
-models: the machine models this part is stated to fit.
-- Only models written in the text. Copy each exactly as written. Never guess, infer from a series name, expand a range ("NV350-NV357") or add models from your own knowledge.
-- A model identifies a machine (Hoover UH70120, Dyson DC07, Kenmore 116.21614, Johnny Vac JV58). Do not return the part's own SKU, MPN, OEM or part number, a supplier code, a size, a voltage, a colour or a pack count.
-- Bag, belt and filter types are not models: "Type AB", "Type Q/C", "Style 12", "Type Y".
-- A brand or product line alone ("Hoover", "WindTunnel", "Navigator") is not a model.
-- If the text names no machine model, return an empty list.
-
-confidence: "high" when the text plainly says the part fits those models ("for", "fits", "compatible with"); "low" when you cannot tell whether a number is a machine model or a part number."""
-
-AI_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "models": {"type": "array", "items": {"type": "string"}},
-        "confidence": {"type": "string", "enum": ["high", "low"]},
-    },
-    "required": ["models", "confidence"],
-    "additionalProperties": False,
-}
-
-
-def accept_ai_models(models: Iterable[str], text: str, own_ids: Set[str]) -> List[str]:
-    """Keep only what the AI was allowed to return: written in the text, not
-    the part's own number, not a bag type, and shaped like a model."""
-    plain = re.sub(r'<[^>]+>', ' ', text or '')
-    haystack = model_key(plain)
-    bag_types = {model_key(t) for m in BAG_TYPE.finditer(plain)
-                 for t in re.split(r'[\s/&,]+', m.group(0))[1:]}
-    accepted: List[str] = []
-    seen: Set[str] = set()
-    for raw in models or []:
-        norm = normalize_model(raw)
-        key = model_key(norm)
-        if (not 2 <= len(key) <= 24 or not any(c.isdigit() for c in key)
-                or key in seen or key in own_ids or key in bag_types
-                or key not in haystack):
-            continue
-        seen.add(key)
-        accepted.append(norm)
-    return accepted
-
-
-def ai_models(items: List[Dict], model: Optional[str] = None, workers: int = 4,
-              log=print) -> Dict[str, Dict]:
-    """Ask Claude for the models each part fits.
-
-    items: [{'sku', 'title', 'description', 'own_ids'}]. Returns
-    {sku: {'models': [...], 'confidence': 'high'|'low'}} for the parts that
-    got an answer; a part whose request failed is absent and is asked again
-    on a later run."""
-    if not items or not os.environ.get('ANTHROPIC_API_KEY'):
-        return {}
-    try:
-        import anthropic
-    except ImportError:
-        log("anthropic package not installed - skipping the AI model pass")
-        return {}
-
-    client = anthropic.Anthropic()
-    model = model or AI_MODEL
-    stop = {'reason': None}
-
-    def one(item: Dict) -> Optional[Dict]:
-        if stop['reason']:
-            return None
-        text = f"{item['title']}\n{item.get('description', '')}"
-        user = (f"Title: {item['title']}\n"
-                f"Description: {(item.get('description') or '(none)')[:3000]}\n"
-                f"SKU / part numbers (never models): {', '.join(sorted(item.get('own_labels', []))) or item['sku']}")
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=4000,
-                system=AI_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user}],
-                # reading a title for model numbers is a simple job: low effort
-                output_config={"effort": "low",
-                               "format": {"type": "json_schema", "schema": AI_SCHEMA}},
-            )
-        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError,
-                anthropic.NotFoundError, anthropic.BadRequestError) as e:
-            # wrong key / model / request shape: every other call fails the same way
-            stop['reason'] = f"{type(e).__name__}: {e}"
-            return None
-        except anthropic.APIError as e:   # rate limit, overload, network - after SDK retries
-            log(f"  AI models: {item['sku']} skipped this run ({type(e).__name__})")
-            return None
-        if response.stop_reason != 'end_turn':
-            return None
-        try:
-            data = json.loads(next((b.text for b in response.content if b.type == 'text'), ''))
-        except ValueError:
-            return None
-        models = accept_ai_models(data.get('models'), text, item.get('own_ids', set()))
-        return {'models': models,
-                'confidence': 'high' if data.get('confidence') == 'high' else 'low'}
-
-    results: Dict[str, Dict] = {}
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for item, answer in zip(items, pool.map(one, items)):
-            if answer is not None:
-                results[item['sku']] = answer
-    if stop['reason']:
-        log(f"  AI model pass stopped: {stop['reason']}")
-    return results
-
-
-# =============================================================================
 # Examples
 # =============================================================================
 
@@ -289,9 +162,4 @@ if __name__ == '__main__':
     ok = merged == ['DC04', 'DC07', 'DC14', 'DC33', 'DC41'] and merge_models(['A1'], []) == ['A1']
     bad += not ok
     print(('ok  ' if ok else 'FAIL') + f' merge -> {merged}')
-    acc = accept_ai_models(['UH70120', 'UH99999', 'AB', '562289001'],
-                           'Belt for Hoover UH70120 Type AB 562289001', {'562289001'})
-    ok = acc == ['UH70120']
-    bad += not ok
-    print(('ok  ' if ok else 'FAIL') + f' accept -> {acc}')
     raise SystemExit(1 if bad else 0)

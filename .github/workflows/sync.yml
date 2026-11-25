@@ -33,11 +33,6 @@ on:
         required: false
         type: number
         default: 50
-      model_ai_cap:
-        description: 'Most parts the AI model back-fill may look at this run (0 = rules only)'
-        required: false
-        type: number
-        default: 500
 
 # A manual run queues behind the scheduled one instead of racing it.
 concurrency:
@@ -61,7 +56,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests anthropic
+          pip install requests
 
       - name: Unit tests (sync rules)
         run: python -m unittest discover -s tests
@@ -104,13 +99,9 @@ jobs:
           SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
           SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-opus-4-8' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           ARCHIVE_MISSING: ${{ github.event.inputs.archive_missing || 'true' }}
           MAX_ARCHIVE_PER_RUN: ${{ github.event.inputs.archive_cap || '50' }}
-          MODEL_AI_CAP: ${{ github.event.inputs.model_ai_cap || '500' }}
-          MODEL_BACKFILL_MODEL: ${{ vars.MODEL_BACKFILL_MODEL || 'claude-sonnet-5-5' }}
         run: |
           echo "Starting JohnnyVac product sync..."
           if [ "$DRY_RUN" = "true" ]; then
@@ -180,14 +171,9 @@ jobs:
             else
               echo "- 🗂️ Collections: Skipped"
             fi
-            if [[ "${{ secrets.ANTHROPIC_API_KEY }}" == "" ]]; then
-              echo "- 🧠 AI steps: ⚠️ SKIPPED — add the ANTHROPIC_API_KEY repo secret to enable the AI model back-fill and Claude-written descriptions (rules and templates only for now)"
-            else
-              echo "- 🧠 AI steps (model back-fill, descriptions): enabled"
-            fi
             echo ""
             echo "### Reports"
-            echo "- 📄 needs_review.csv: Products that couldn't be auto-categorized, plus every model the back-fill found (models:rule / models:ai)"
+            echo "- 📄 needs_review.csv: Products that couldn't be auto-categorized, plus every model the rule back-fill found (models:rule)"
             echo "- 📄 skipped_products.csv: Feed rows the never-sell rules exclude"
             echo ""
             echo "### Timestamp"
