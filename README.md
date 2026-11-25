@@ -9,8 +9,7 @@ metadata, SEO, and product descriptions.
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `sync.yml` | **Daily 7:00 UTC** + manual | Full catalog sync: create/update/archive products, inventory + prices, taxonomy, tags, brand, compatible models (merge + back-fill), SEO backfill, thin-description enrichment. Scheduled runs also create new collections and rank them. |
-| `generate-descriptions.yml` | **Weekly Mon 8:00 UTC** + manual | AI-written descriptions (Claude) for products with thin/empty copy, 300 per scheduled run. Scheduled runs skip if `ANTHROPIC_API_KEY` isn't set. |
+| `sync.yml` | **Daily 7:00 UTC** + manual | Full catalog sync: create/update/archive products, inventory + prices, status, taxonomy, tags, compatible models (merge + rule back-fill), SEO, thin-description enrichment (templates). Vendor and title only on new products. Scheduled runs also create new collections and rank them. |
 | `seo-generate.yml` | Manual | Backfill SEO meta titles/descriptions. |
 | `backfill-metafields.yml` | Manual | One-time rollout of structured `custom.*` metafields to every product (dry-run by default). Does not write `compatible_models`. |
 | `backfill-mpn.yml` | Manual | Legacy MPN-only backfill (superseded by `backfill-metafields.yml`). |
@@ -23,11 +22,10 @@ metadata, SEO, and product descriptions.
 | `SHOPIFY_STORE` | ✅ | e.g. `kingsway-janitorial.myshopify.com` |
 | `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET` | ✅ (preferred) | Custom-app client credentials. A fresh Admin API token is minted at runtime, so it always carries the app's *current* scopes. |
 | `SHOPIFY_ACCESS_TOKEN` | fallback | Static `shpat_…` token, only used when client credentials aren't set. Beware: static tokens keep their original scopes forever. |
-| `ANTHROPIC_API_KEY` | ⚠️ recommended | Enables the AI steps: the model back-fill's AI pass and Claude-written product descriptions. **Currently missing** — without it the back-fill runs its rule pass only, descriptions fall back to templates and the weekly description run skips itself. |
 
-Optional repo *variables*: `ANTHROPIC_MODEL` (product descriptions, defaults to
-`claude-opus-4-8`) and `MODEL_BACKFILL_MODEL` (the model back-fill's AI pass,
-defaults to `claude-sonnet-5-5`).
+There are no AI steps and no `ANTHROPIC_API_KEY`: descriptions come from
+templates, and model numbers the rule pass cannot find are entered in
+Shopify (Sidekick).
 
 ## Required Shopify app access scopes
 
@@ -59,7 +57,9 @@ minted token picks them up:
   A feed row one of these rules excludes is never created; if a product
   already exists for it, it is held in **DRAFT**.
 - **Vendor = brand, supplier = tags.** Vendor and `custom.brand` hold the
-  brand the product is, or the machine brand a part is made for. Supplier
+  brand the product is, or the machine brand a part is made for. The sync
+  sets them when it creates a product; after that the **Brand Fixer** app in
+  Shopify maintains them (see below). Supplier
   routing never reads the vendor. Products tagged `hibbert` (or
   `sync:ignore`) are not in the JohnnyVac feed and are never drafted or
   archived by this sync (`SYNC_PROTECTED_TAGS`).
@@ -104,24 +104,21 @@ The homepage part finder and the "Fits model" filter read this metafield.
   A list is never written back shorter or empty.
 - The part's own SKU, MPN or part number is never a model, and neither is a
   bag / belt type ("Type AB", "Type Q/C").
-- **Back-fill** for active parts with no models (`model_backfill.py`):
-  1. *Rule pass* (free, daily): models named after "for", "fits",
-     "compatible with", "models" in the title and description, kept only if
-     the catalogue already lists that model somewhere. Tag: `models:rule`.
-  2. *AI pass* (needs `ANTHROPIC_API_KEY`; `model_ai_cap`, default 500 parts
-     per run): Claude returns `{"models": [...], "confidence": "high|low"}`;
-     only models that appear in the part's text are accepted. High
-     confidence → written, tag `models:ai`. Low confidence → **not**
-     written, tag `models:ai-low`. Nothing found → tag `models:none`. The
-     last two are not asked again; remove the tag to have a part re-checked.
-  3. Every result is listed in `needs_review.csv`.
+- **Rule back-fill** for active parts with no models (`model_backfill.py`,
+  free, daily): models named after "for", "fits", "compatible with",
+  "models" in the title and description, kept only if the catalogue already
+  lists that model somewhere. Tag: `models:rule`; every result is listed in
+  `needs_review.csv`. Rule-filled parts are re-checked each run and can gain
+  models as more are entered elsewhere. Most remaining parts only carry an
+  OEM part number, not a machine model, so the rest is done by hand in
+  Shopify (Sidekick). There is no AI pass.
 - Models are upper case with no spaces; dashes stay as written (DCF-15).
 
 ## What gets written to each product
 ## What gets written to each product
 
-- **Core**: title, product type (37-category taxonomy from
-  `category_map_v4.json`), vendor (detected brand), status, tags
+- **Core**: product type (37-category taxonomy from
+  `category_map_v4.json`), status, tags
   (manual tags preserved; only `confidence:*`, `source:*` and the
   category handle are managed).
 - **Standard Product Taxonomy** category (powers Google Merchant Center).
@@ -129,17 +126,32 @@ The homepage part finder and the "Fits model" filter read this metafield.
   `material`, `compatible_models` (merged, see above), `size_inches`,
   `voltage` — extracted from the title/type. Google accepts Brand + MPN in
   place of GTIN.
-- **Brand**: the feed has no brand column, so the brand is read from the
-  title: the brand a part is made *for* ("Bag for Hoover …"), else the first
-  machine brand named, else the product's maker (Envirocare, Plastiflex …).
-  JohnnyVac is used where the title says so (name, a JV model number, a JV
-  house model). A title that names no brand gets
-  `settings.brands.fallback_vendor`.
-- **SEO** meta title/description — only when missing (manual SEO kept).
+- **Title, vendor, `custom.brand` — new products only.** The title is the
+  cleaned feed title. The feed has no brand column, so the brand is read
+  from the title: the brand a part is made *for* ("Bag for Hoover …"), else
+  the first machine brand named, else the product's maker. A title that
+  names no brand gets `settings.brands.fallback_vendor` (JohnnyVac). On
+  existing products the sync never writes title or vendor, and fills
+  `custom.brand` only when it is empty.
+- **SEO** meta title/description — generated from the product's facts and
+  kept in step with the feed; tag a product `seo:manual` to keep
+  hand-written SEO.
 - **Description** — only when the existing one is thin (< 80 chars of
-  text). AI-written via Claude when `ANTHROPIC_API_KEY` is set, template
-  fallback otherwise. Rich/manual descriptions are never overwritten.
+  text): the feed's own description when it has one, a template otherwise.
+  Rich/manual descriptions are never overwritten.
 - **Price + inventory** (absolute quantities, batched).
+
+## Brand Fixer (in Shopify)
+
+A small Shopify app that keeps vendor = brand on products whose vendor is
+JohnnyVac. Shopify notifies it whenever a product is created or its vendor
+or title changes, so products the 07:00 sync creates are corrected within
+seconds. It sets vendor and `custom.brand` from brand codes in the SKU /
+title (`hoover_`, `bissel_` …), "Royalhoover", an existing `custom.brand`,
+or a brand named in the title (not for Johnny Vac's own products), and
+turns brand codes in titles into plain part numbers. Its page has *Check
+all products* (dry run) and *Fix now*. Because it owns these fields after
+creation, the sync must not reset them.
 
 ## Collections
 

@@ -6,8 +6,7 @@ Shared product content engine for Kingsway Janitorial.
 Single source of truth for:
   - Brand detection (real vendor instead of hardcoded "JohnnyVac")
   - Product attribute extraction (pack qty, materials, dimensions, models)
-  - Rich description generation (AI via Claude API when ANTHROPIC_API_KEY is
-    set, with template fallback)
+  - Rich description generation (templates)
   - SEO meta title / meta description generation
   - Shopify Standard Product Taxonomy mapping (powers Google Merchant
     Center categorization and structured data)
@@ -18,7 +17,6 @@ Used by: sync_shopify_bulk_v3.py, description_generator.py, seo_generator.py
 import os
 import re
 import json
-import html as html_lib
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -793,134 +791,15 @@ def generate_description_template(title: str, product_type: str, sku: str = '') 
     return f"<p>{p1}</p>\n<p>{p2}</p>" if p2 else f"<p>{p1}</p>"
 
 
-# =============================================================================
-# AI DESCRIPTIONS (Claude API — used when ANTHROPIC_API_KEY is set)
-# =============================================================================
-
-AI_MODEL = os.environ.get('ANTHROPIC_MODEL', 'claude-opus-4-8')
-AI_BATCH_SIZE = 10
-
-AI_SYSTEM_PROMPT = """You write product descriptions for Kingsway Janitorial, a Vancouver-based commercial cleaning and janitorial supply store that ships across Canada. The catalog is vacuum parts (bags, filters, belts, motors, hoses), cleaning chemicals, janitorial tools, and commercial cleaning equipment, much of it distributed by JohnnyVac.
-
-For each product you receive, write a unique, natural product description as exactly two short paragraphs (70-130 words total):
-- Paragraph 1: what the product is and the problem it solves for the buyer.
-- Paragraph 2: practical details (fit, use, durability) and end with a short sentence about availability from Kingsway Janitorial with shipping across Canada. Vary the wording of this closing line between products.
-
-Rules:
-- Use ONLY facts present in the provided title, brand, and category. Never invent dimensions, materials, certifications, pack counts, or compatibility claims.
-- If a brand or model number appears in the title, mention it naturally (helps customers searching for that part).
-- Write for commercial/professional buyers; plain, confident language. No hype words like "revolutionary" or "best-ever", no exclamation marks, no keyword stuffing.
-- Vary sentence structure and openings across products so descriptions don't read as copies of each other.
-- Plain text only in each paragraph (no HTML, no markdown, no lists)."""
-
-AI_OUTPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "products": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "sku": {"type": "string"},
-                    "paragraph1": {"type": "string"},
-                    "paragraph2": {"type": "string"},
-                },
-                "required": ["sku", "paragraph1", "paragraph2"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["products"],
-    "additionalProperties": False,
-}
-
-
-def ai_available() -> bool:
-    return bool(os.environ.get('ANTHROPIC_API_KEY'))
-
-
-def generate_descriptions_ai(items: List[Dict], model: str = None,
-                             batch_size: int = AI_BATCH_SIZE) -> Dict[str, str]:
-    """
-    Generate unique descriptions with the Claude API.
-
-    items: list of {'sku', 'title', 'product_type'} dicts.
-    Returns {sku: description_html}. Items that fail are simply absent from
-    the result — callers fall back to generate_description_template().
-    """
-    if not items or not ai_available():
-        return {}
-
-    try:
-        import anthropic
-    except ImportError:
-        _log("anthropic package not installed — falling back to templates", 'WARNING')
-        return {}
-
-    client = anthropic.Anthropic()
-    model = model or AI_MODEL
-    results: Dict[str, str] = {}
-    total_batches = (len(items) + batch_size - 1) // batch_size
-
-    for batch_num, start in enumerate(range(0, len(items), batch_size), 1):
-        chunk = items[start:start + batch_size]
-        product_lines = []
-        for it in chunk:
-            brand = extract_brand(it.get('title', '')) or 'unknown'
-            product_lines.append(
-                f"- SKU: {it['sku']} | Title: {it.get('title', '')} | "
-                f"Brand: {brand} | Category: {it.get('product_type', '')}"
-            )
-        user_msg = (
-            "Write descriptions for these products:\n" + "\n".join(product_lines)
-        )
-
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=8000,
-                system=AI_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_msg}],
-                output_config={"format": {"type": "json_schema", "schema": AI_OUTPUT_SCHEMA}},
-            )
-            if response.stop_reason == "refusal":
-                _log(f"AI batch {batch_num}/{total_batches}: request refused, using templates", 'WARNING')
-                continue
-            text = next((b.text for b in response.content if b.type == "text"), "")
-            data = json.loads(text)
-            wanted_skus = {it['sku'] for it in chunk}
-            for prod in data.get('products', []):
-                sku = prod.get('sku', '')
-                if sku not in wanted_skus:
-                    continue
-                p1 = html_lib.escape((prod.get('paragraph1') or '').strip(), quote=False)
-                p2 = html_lib.escape((prod.get('paragraph2') or '').strip(), quote=False)
-                if len(p1) + len(p2) < 60:
-                    continue
-                results[sku] = f"<p>{p1}</p>\n<p>{p2}</p>" if p2 else f"<p>{p1}</p>"
-        except Exception as e:
-            _log(f"AI batch {batch_num}/{total_batches} failed ({e}) — templates will be used", 'WARNING')
-            continue
-
-        if batch_num % 10 == 0 or batch_num == total_batches:
-            _log(f"  AI descriptions: batch {batch_num}/{total_batches} ({len(results)} generated)")
-
-    return results
-
-
 def build_description(title: str, product_type: str, sku: str = '',
-                      jv_desc_html: str = '', ai_desc: str = None,
-                      min_length: int = 80) -> str:
+                      jv_desc_html: str = '', min_length: int = 80) -> str:
     """
     Pick the best available description:
       1. JohnnyVac's own description when it has real content (factual specs)
-      2. AI-generated description (when provided)
-      3. Template-generated description
+      2. Template-generated description
     """
     if len(strip_html(jv_desc_html)) >= min_length:
         return jv_desc_html
-    if ai_desc:
-        return ai_desc
     return generate_description_template(title, product_type, sku)
 
 
